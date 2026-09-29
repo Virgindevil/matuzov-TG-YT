@@ -81,7 +81,16 @@ async def safe_edit(message: Message, text: str, reply_markup=None):
 
 
 def extract_info(url: str) -> dict:
-    with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}) as ydl:
+    with YoutubeDL({
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        # During inspection we want the complete format table, not yt-dlp's
+        # default single-format selection. This avoids "Requested format is not
+        # available" before the user has even chosen a quality.
+        "format": "all",
+    }) as ydl:
         return ydl.extract_info(url, download=False)
 
 
@@ -106,7 +115,11 @@ def quality_keyboard(heights: list[int]) -> InlineKeyboardMarkup:
 def download_video(url: str, height: int, job_dir: Path, loop, queue: asyncio.Queue) -> tuple[Path, dict]:
     job_dir.mkdir(parents=True, exist_ok=True)
     output = str(job_dir / "%(title).120B [%(id)s].%(ext)s")
-    fmt = f"bv*[height={height}][ext=mp4]+ba[ext=m4a]/bv*[height={height}]+ba/b[height={height}]"
+    fmt = (
+        f"bv[height<={height}][ext=mp4]+ba[ext=m4a]/"
+        f"bv[height<={height}]+ba/"
+        f"b[height<={height}]/best[height<={height}]"
+    )
     last_update = 0.0
 
     def hook(d):
