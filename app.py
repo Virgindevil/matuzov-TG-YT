@@ -13,7 +13,22 @@ import yt_dlp
 
 BASE=Path(__file__).resolve().parent
 WORK=Path(os.getenv("WORK_DIR","/tmp/ytdl-web")); WORK.mkdir(parents=True,exist_ok=True)
-COOKIE_FILE=os.getenv("YOUTUBE_COOKIES_FILE","/etc/secrets/youtube_cookies.txt").strip()
+COOKIE_SOURCE=os.getenv("YOUTUBE_COOKIES_FILE","/etc/secrets/youtube_cookies.txt").strip()
+COOKIE_FILE="/tmp/youtube_cookies.txt"
+
+def prepare_cookie_copy():
+    source=Path(COOKIE_SOURCE)
+    target=Path(COOKIE_FILE)
+    if not source.is_file() or source.stat().st_size <= 0:
+        return False
+    try:
+        shutil.copyfile(source,target)
+        os.chmod(target,0o600)
+        return target.is_file() and target.stat().st_size > 0
+    except Exception:
+        return False
+
+prepare_cookie_copy()
 R2_ENDPOINT=os.getenv("R2_ENDPOINT","").strip().rstrip("/")
 R2_ACCESS_KEY_ID=os.getenv("R2_ACCESS_KEY_ID","").strip()
 R2_SECRET_ACCESS_KEY=os.getenv("R2_SECRET_ACCESS_KEY","").strip()
@@ -32,7 +47,9 @@ class DownloadRequest(BaseModel): url:str; height:int
 
 def cookies_ok():
     p=Path(COOKIE_FILE)
-    return bool(COOKIE_FILE) and p.is_file() and p.stat().st_size>0
+    if not (p.is_file() and p.stat().st_size > 0):
+        prepare_cookie_copy()
+    return p.is_file() and p.stat().st_size > 0
 
 def r2_ok(): return all([R2_ENDPOINT,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET])
 
@@ -47,6 +64,7 @@ def clean(url):
     return url
 
 def common_ydl():
+    prepare_cookie_copy()
     o={"quiet":True,"no_warnings":True,"noplaylist":True}
     if cookies_ok(): o["cookiefile"]=COOKIE_FILE
     return o
@@ -120,6 +138,7 @@ async def index(): return FileResponse(BASE/"static"/"index.html")
 @app.get("/health")
 async def health():
     return {"status":"ok","service":"youtube-downloader-web","r2_configured":r2_ok(),
+            "youtube_cookie_secret":Path(COOKIE_SOURCE).is_file(),
             "youtube_cookies":cookies_ok(),"max_concurrent_jobs":MAX_CONCURRENT_JOBS}
 
 @app.post("/api/analyze")
