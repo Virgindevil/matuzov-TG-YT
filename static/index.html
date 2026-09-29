@@ -1,1 +1,18 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Loader</title><link rel="stylesheet" href="/static/style.css"></head><body><main><h1>Video Loader</h1><p>Вставь ссылку YouTube, выбери качество и дождись подготовки файла.</p><form id="f"><input id="u" type="url" placeholder="https://youtube.com/watch?v=..." required><button>Найти видео</button></form><pre id="err"></pre><section id="v" hidden><img id="im"><h2 id="t"></h2><p id="m"></p><div id="q"></div></section><section id="p" hidden><h2 id="st">Подготовка</h2><progress id="bar" max="100" value="0"></progress><p id="msg"></p></section><section id="d" hidden><h2>✓ Готово</h2><a id="a">Скачать видео</a></section></main><script src="/static/app.js"></script></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Video Downloader</title><link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <h1>Video Downloader</h1>
+  <p class="muted">YouTube и другие сайты, которые поддерживает yt-dlp.</p>
+  <div class="row"><input id="url" placeholder="Вставьте ссылку на видео"><button id="go">Найти видео</button></div>
+  <section id="card" class="hidden">
+    <img id="thumb"><div class="info"><h2 id="title"></h2><p id="stage"></p>
+    <div class="bar"><i id="bar"></i></div><div id="formats"></div><a id="download" class="button hidden">Скачать готовый файл</a>
+    <pre id="error"></pre></div>
+  </section>
+</main><script src="/static/app.js"></script>
+</body></html>

@@ -1,1 +1,0 @@
-Render Secret File: youtube_cookies.txt -> /etc/secrets/youtube_cookies.txt\nCheck /health for youtube_cookies:true.\n
