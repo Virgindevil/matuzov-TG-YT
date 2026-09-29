@@ -3,6 +3,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY bot.py .
-RUN mkdir -p downloads
-CMD ["python", "bot.py"]
+COPY . .
+ENV PORT=10000
+CMD ["sh","-c","uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]

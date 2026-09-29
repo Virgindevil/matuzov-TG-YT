@@ -1,16 +1,32 @@
-# YouTube Telegram Bot + Cloudflare R2
+# YouTube Downloader Web + Cloudflare R2
 
-## Render environment variables
+Веб-версия проекта без Telegram.
 
-- `BOT_TOKEN`
+## Render Environment
+
+Обязательные переменные:
+
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET`
 - `R2_ENDPOINT`
-- `R2_LINK_TTL=21600` (optional, 6 hours by default)
 
-Deploy as a Docker Web Service. `/health` returns service status.
+Опционально:
 
-## Format selection
+- `R2_LINK_TTL=21600`
+- `MAX_CONCURRENT_JOBS=1`
 
-The bot first reads the complete YouTube format table without selecting a download format. It then displays available standard qualities from 480p through 2160p. After the user chooses a quality, yt-dlp downloads the best video stream at or below that resolution plus the best available audio, with fallbacks for videos that only expose combined streams.
+`BOT_TOKEN` больше не используется.
+
+## Deploy на Render
+
+Создайте/используйте Web Service с Runtime = Docker и задеплойте репозиторий.
+После запуска:
+
+- `/health` — состояние сервиса
+- `/` — веб-интерфейс
+
+## Важно
+
+Cloudflare R2 подходит для больших объектов, но текущий worker всё ещё использует локальное временное место Render для yt-dlp/FFmpeg.
+Поэтому 10–20 ГБ файлы на бесплатном Render пока не гарантируются. Сначала проверьте полный поток на небольшом видео.

@@ -1,6 +1,4 @@
 .env
-.venv/
 __pycache__/
-downloads/
-*.part
-*.ytdl
+*.pyc
+.DS_Store

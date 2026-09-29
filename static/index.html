@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Video Loader</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">VIDEO LOADER</div>
+      <h1>Скачать видео<br><span>в нужном качестве.</span></h1>
+      <p>Вставь ссылку на YouTube. Сервис подготовит видео, загрузит его во временное хранилище и даст прямую ссылку.</p>
+
+      <form id="searchForm" class="urlbox">
+        <input id="urlInput" type="url" placeholder="https://www.youtube.com/watch?v=..." required autocomplete="off">
+        <button id="analyzeBtn" type="submit">Найти видео</button>
+      </form>
+      <div id="topError" class="error hidden"></div>
+    </section>
+
+    <section id="videoCard" class="card hidden">
+      <img id="thumb" class="thumb" alt="">
+      <div class="meta">
+        <div class="mini">НАЙДЕНО</div>
+        <h2 id="title"></h2>
+        <div id="subline" class="subline"></div>
+        <div class="quality-title">Качество</div>
+        <div id="qualities" class="qualities"></div>
+      </div>
+    </section>
+
+    <section id="progressCard" class="card progress-card hidden">
+      <div class="mini" id="stageLabel">ПОДГОТОВКА</div>
+      <h2 id="progressTitle">Готовим видео</h2>
+      <div class="bar"><div id="barFill"></div></div>
+      <div class="progress-row">
+        <strong id="percent">0%</strong>
+        <span id="bytes"></span>
+      </div>
+      <p id="message" class="subline"></p>
+    </section>
+
+    <section id="doneCard" class="card done hidden">
+      <div class="check">✓</div>
+      <div>
+        <div class="mini">ГОТОВО</div>
+        <h2>Видео подготовлено</h2>
+        <p id="doneInfo" class="subline"></p>
+        <a id="downloadLink" class="download" href="#" rel="noopener">Скачать видео</a>
+      </div>
+    </section>
+
+    <footer>Файлы выдаются через временную подписанную ссылку Cloudflare R2.</footer>
+  </main>
+<script src="/static/app.js"></script>
+</body>
+</html>
