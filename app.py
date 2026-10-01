@@ -47,6 +47,10 @@ def opts(url=""):
         if cookies is not None and cookies.is_file():
             options["cookiefile"] = str(cookies)
 
+        proxy = os.getenv("YOUTUBE_PROXY", "").strip()
+        if proxy:
+            options["proxy"] = proxy
+
     return options
 def setj(j,**kw):
     with LOCK: JOBS[j].update(kw)
@@ -60,6 +64,7 @@ def health():
         "youtube_cookies": work is not None and work.is_file(),
         "youtube_cookies_writable": work is not None and os.access(work, os.W_OK),
         "youtube_cookies_size": work.stat().st_size if work is not None and work.is_file() else 0,
+        "youtube_proxy_configured": bool(os.getenv("YOUTUBE_PROXY", "").strip()),
     }
 
 @app.post("/api/analyze")
