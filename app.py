@@ -53,7 +53,7 @@ def parse_vless_uri(uri):
         ss["tcpSettings"]={"header":{"type":"http","request":{"path":[unquote(q.get("path","/"))],"headers":{"Host":[q.get("host",p.hostname)]}}}}
     return {
         "log":{"loglevel":"warning"},
-        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}}],
+        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}},{"listen":"127.0.0.1","port":1081,"protocol":"http","settings":{}}],
         "outbounds":[outbound,{"protocol":"freedom","tag":"direct"}]
     }
 
@@ -243,7 +243,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
         v,a,_=_pick_streams(info,mode)
         title=_safe_name(info.get("title"))
         cmd=["ffmpeg","-hide_banner","-loglevel","error"]
-        proxy=[]
+        proxy=["-http_proxy","http://127.0.0.1:1081"] if xray_ready() else []
         if mode=="audio":
             cmd+=proxy+["-i",a["url"],"-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
             ext="mp3"; media="audio/mpeg"
@@ -256,7 +256,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             # Fragmented MP4 can be written to stdout, so the browser receives bytes immediately.
             cmd+=["-c","copy","-movflags","frag_keyframe+empty_moov+default_base_moof","-f","mp4","pipe:1"]
             ext="mp4"; media="video/mp4"
-        proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=1024*1024)
+        proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
         def body():
             try:
                 while True:
