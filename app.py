@@ -15,6 +15,8 @@ SECRET_VLESS=Path("/etc/secrets/vless.txt")
 XRAY_CONFIG=TMP/"xray.json"
 XRAY_PROC=None
 XRAY_ERROR=None
+COOKIE_LOCK=threading.Lock()
+COOKIE_READY=False
 
 def parse_vless_uri(uri):
     from urllib.parse import urlsplit, parse_qs, unquote
@@ -82,15 +84,26 @@ def start_xray():
 def xray_ready():
     return XRAY_PROC is not None and XRAY_PROC.poll() is None
 
-def sync_youtube_cookies():
+def sync_youtube_cookies(force=False):
+    global COOKIE_READY
     if not SECRET_YT_COOKIES.is_file():
         return None
-    try:
-        shutil.copy2(SECRET_YT_COOKIES, WORK_YT_COOKIES)
-        return WORK_YT_COOKIES
-    except Exception:
-        traceback.print_exc()
-        return None
+    # The Render secret file is immutable. Copy it once to writable /tmp.
+    # Multiple simultaneous yt-dlp requests must never overwrite the file
+    # while another request is reading/updating it.
+    with COOKIE_LOCK:
+        if COOKIE_READY and WORK_YT_COOKIES.is_file() and not force:
+            return WORK_YT_COOKIES
+        try:
+            tmp_cookie=WORK_YT_COOKIES.with_suffix(".tmp")
+            shutil.copyfile(SECRET_YT_COOKIES,tmp_cookie)
+            os.replace(tmp_cookie,WORK_YT_COOKIES)
+            COOKIE_READY=True
+            return WORK_YT_COOKIES
+        except Exception:
+            COOKIE_READY=False
+            traceback.print_exc()
+            return None
 JOBS={}; LOCK=threading.Lock(); SEM=threading.Semaphore(int(os.getenv("MAX_JOBS","1")))
 app=FastAPI(title="Video Downloader v5")
 
@@ -330,5 +343,6 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
         traceback.print_exc()
         raise HTTPException(400,str(e))
 
+sync_youtube_cookies(force=True)
 start_xray()
 app.mount("/",StaticFiles(directory=BASE/"static",html=True),name="static")
