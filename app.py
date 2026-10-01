@@ -175,6 +175,31 @@ def _safe_name(name):
     s="".join("_" if c in bad else c for c in (name or "video"))
     return s.strip(" .")[:150] or "video"
 
+@app.get("/api/network-test")
+def network_test():
+    result={"xray_running":xray_ready()}
+    if not xray_ready():
+        result["ok"]=False
+        result["error"]="Xray не запущен"
+        return result
+    try:
+        p=subprocess.run(
+            ["curl","-sS","-o","/dev/null","-w","%{http_code}",
+             "--connect-timeout","10","--max-time","20",
+             "--socks5-hostname","127.0.0.1:1080",
+             "https://www.youtube.com/robots.txt"],
+            capture_output=True,text=True,timeout=25
+        )
+        result["youtube_http"]=p.stdout.strip()
+        result["curl_exit"]=p.returncode
+        result["ok"]=p.returncode==0 and p.stdout.strip().startswith(("2","3"))
+        if p.returncode!=0:
+            result["error"]=(p.stderr or "Ошибка соединения через VLESS")[-300:]
+    except Exception as e:
+        result["ok"]=False
+        result["error"]=str(e)
+    return result
+
 @app.post("/api/analyze")
 def analyze(d:URLIn):
     u=valid(d.url)
