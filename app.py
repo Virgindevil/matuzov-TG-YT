@@ -1,8 +1,8 @@
 import os,time,uuid,shutil,threading,traceback,subprocess,json
 from pathlib import Path
 from urllib.parse import urlparse
-from fastapi import FastAPI,HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI,HTTPException,Query
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
@@ -53,7 +53,7 @@ def parse_vless_uri(uri):
         ss["tcpSettings"]={"header":{"type":"http","request":{"path":[unquote(q.get("path","/"))],"headers":{"Host":[q.get("host",p.hostname)]}}}}
     return {
         "log":{"loglevel":"warning"},
-        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}}],
+        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}},{"listen":"127.0.0.1","port":1081,"protocol":"http","settings":{}}],
         "outbounds":[outbound,{"protocol":"freedom","tag":"direct"}]
     }
 
@@ -141,6 +141,44 @@ def health():
         "xray_error": XRAY_ERROR,
     }
 
+
+def _fmt_size(f,duration=0):
+    size=f.get("filesize") or f.get("filesize_approx")
+    if size: return int(size)
+    tbr=f.get("tbr")
+    return int(float(tbr)*1000/8*duration) if tbr and duration else 0
+
+def _pick_streams(info,mode):
+    fs=info.get("formats") or []
+    duration=float(info.get("duration") or 0)
+    if mode=="audio":
+        aud=[f for f in fs if f.get("url") and f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
+        a=max(aud,key=lambda f:(f.get("abr") or f.get("tbr") or 0),default=None)
+        if not a: raise RuntimeError("Аудиопоток не найден")
+        return None,a,_fmt_size(a,duration)
+    if mode.startswith("video:"):
+        h=int(mode.split(":",1)[1])
+    else:
+        h=max([int(f.get("height") or 0) for f in fs if f.get("vcodec") not in (None,"none")],default=0)
+    vids=[f for f in fs if f.get("url") and f.get("vcodec") not in (None,"none") and int(f.get("height") or 0)<=h]
+    if not vids: raise RuntimeError("Видеопоток не найден")
+    # Prefer the requested height, then higher bitrate. Separate video-only is fine: audio is added below.
+    v=max(vids,key=lambda f:(int(f.get("height") or 0),f.get("tbr") or 0))
+    if v.get("acodec") not in (None,"none"):
+        return v,None,_fmt_size(v,duration)
+    aud=[f for f in fs if f.get("url") and f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
+    a=max(aud,key=lambda f:(f.get("abr") or f.get("tbr") or 0),default=None)
+    return v,a,_fmt_size(v,duration)+(_fmt_size(a,duration) if a else 0)
+
+def _safe_name(name):
+    bad='<>:"/\\|?*'
+    s="".join("_" if c in bad else c for c in (name or "video"))
+    return s.strip(" .")[:150] or "video"
+
+def _ffmpeg_proxy_args():
+    # ffmpeg understands an HTTP proxy. Xray exposes one locally on 1081.
+    return ["-http_proxy","http://127.0.0.1:1081"] if xray_ready() else []
+
 @app.post("/api/analyze")
 def analyze(d:URLIn):
     u=valid(d.url)
@@ -154,85 +192,69 @@ def analyze(d:URLIn):
             elif h>chosen[-1]: chosen[-1]=h
         if len(chosen)>8:
             ids={round(x*(len(chosen)-1)/7) for x in range(8)}; chosen=[chosen[x] for x in sorted(ids)]
-        duration=float(i.get("duration") or 0)
-        def fsize(f):
-            size=f.get("filesize") or f.get("filesize_approx")
-            if size: return int(size)
-            tbr=f.get("tbr")
-            return int(float(tbr)*1000/8*duration) if tbr and duration else 0
-        audios=[f for f in fs if f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
-        best_audio=max(audios,key=lambda f:(f.get("abr") or f.get("tbr") or 0),default=None)
-        audio_size=fsize(best_audio) if best_audio else 0
         q=[]
         for h in chosen:
-            vids=[f for f in fs if f.get("height") and int(f["height"])<=h and f.get("vcodec") not in (None,"none")]
-            best_video=max(vids,key=lambda f:(int(f.get("height") or 0),f.get("tbr") or 0),default=None)
-            size=(fsize(best_video) if best_video else 0)+audio_size
+            try:
+                _,_,size=_pick_streams(i,f"video:{h}")
+            except Exception:
+                size=0
             q.append({"mode":f"video:{h}","label":"4K" if 2100<=h<=2200 else ("8K" if h>=4320 else f"{h}p"),"size":size or None})
-        if audios: q.append({"mode":"audio","label":"MP3","size":audio_size or None})
-        best_size=max((x.get("size") or 0 for x in q if x["mode"].startswith("video:")),default=0)
+        try:
+            _,_,audio_size=_pick_streams(i,"audio")
+            q.append({"mode":"audio","label":"MP3","size":audio_size or None})
+        except Exception:
+            pass
+        try:
+            _,_,best_size=_pick_streams(i,"best")
+        except Exception:
+            best_size=0
         q.append({"mode":"best","label":"Лучшее","size":best_size or None})
         return {"title":i.get("title") or "Видео","thumbnail":i.get("thumbnail"),"source":i.get("extractor_key") or i.get("extractor") or urlparse(u).hostname,"qualities":q}
     except Exception as e: raise HTTPException(400,str(e))
 
-@app.post("/api/jobs")
-def create(d:DownloadIn):
-    u=valid(d.url); jid=uuid.uuid4().hex
-    JOBS[jid]={"status":"queued","progress":0,"stage":"В очереди","error":None,"file":None,"name":None,"created":time.time()}
-    threading.Thread(target=worker,args=(jid,u,d.mode),daemon=True).start()
-    return {"job_id":jid}
-
-@app.get("/api/jobs/{jid}")
-def status(jid:str):
-    j=JOBS.get(jid)
-    if not j: raise HTTPException(404,"Задание не найдено")
-    return {k:v for k,v in j.items() if k!="file"}
-
-@app.get("/api/jobs/{jid}/file")
-def file(jid:str):
-    j=JOBS.get(jid)
-    if not j or j["status"]!="done": raise HTTPException(404,"Файл ещё не готов")
-    p=Path(j["file"])
-    if not p.is_file(): raise HTTPException(410,"Временный файл уже удалён")
-    return FileResponse(p,filename=j["name"],media_type="application/octet-stream")
-
-def worker(jid,u,mode):
-    folder=TMP/jid; folder.mkdir(parents=True,exist_ok=True)
+@app.get("/api/download")
+def direct_download(url:str=Query(...),mode:str=Query("best")):
+    u=valid(url)
     try:
-      with SEM:
-        setj(jid,status="working",stage="Подготовка",progress=1)
-        if mode=="audio": fmt="bestaudio/best"; merge=None; pp=[{"key":"FFmpegExtractAudio","preferredcodec":"mp3","preferredquality":"0"}]
-        elif mode.startswith("video:"):
-            h=int(mode.split(":")[1]); fmt=f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/bestvideo+bestaudio/best"; merge="mkv"; pp=[]
-        else: fmt="bestvideo+bestaudio/best"; merge="mkv"; pp=[]
-        peak=[1]
-        def hook(d):
-            if d.get("status")=="downloading":
-                inf=d.get("info_dict") or {}; aud=inf.get("vcodec")=="none" and inf.get("acodec") not in (None,"none")
-                base,span=(72,20) if aud else (2,70); total=d.get("total_bytes") or d.get("total_bytes_estimate") or 0; got=d.get("downloaded_bytes") or 0
-                fi=d.get("fragment_index") or 0; fc=d.get("fragment_count") or 0; ratio=fi/fc if fc else (got/total if total else 0)
-                p=max(peak[0],int(base+max(0,min(1,ratio))*span)); peak[0]=p
-                setj(jid,progress=p,stage="Скачивание аудио" if aud else "Скачивание видео")
-        def ph(d):
-            if d.get("status")=="started": setj(jid,progress=94,stage="Обработка FFmpeg")
-            elif d.get("status")=="finished": setj(jid,progress=98,stage="Завершение")
-        o=opts(u)|{"format":fmt,"outtmpl":str(folder/"%(title).160B [%(id)s].%(ext)s"),"progress_hooks":[hook],"postprocessor_hooks":[ph],"postprocessors":pp}
-        if merge:o["merge_output_format"]=merge
-        with yt_dlp.YoutubeDL(o) as y:y.extract_info(u,download=True)
-        files=[p for p in folder.iterdir() if p.is_file() and not p.name.endswith((".part",".ytdl"))]
-        if not files: raise RuntimeError("Готовый файл не найден")
-        final=max(files,key=lambda p:p.stat().st_mtime)
-        setj(jid,status="done",progress=100,stage="Готово",file=str(final),name=final.name)
+        # Metadata only. Nothing is downloaded to Render's disk.
+        with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True}) as y:
+            info=y.extract_info(u,download=False)
+        v,a,_=_pick_streams(info,mode)
+        title=_safe_name(info.get("title"))
+        cmd=["ffmpeg","-hide_banner","-loglevel","error"]
+        proxy=_ffmpeg_proxy_args()
+        if mode=="audio":
+            cmd+=proxy+["-i",a["url"],"-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
+            ext="mp3"; media="audio/mpeg"
+        else:
+            cmd+=proxy+["-i",v["url"]]
+            if a:
+                cmd+=proxy+["-i",a["url"],"-map","0:v:0","-map","1:a:0"]
+            else:
+                cmd+=["-map","0:v:0","-map","0:a?"]
+            # Fragmented MP4 can be written to stdout, so the browser receives bytes immediately.
+            cmd+=["-c","copy","-movflags","frag_keyframe+empty_moov+default_base_moof","-f","mp4","pipe:1"]
+            ext="mp4"; media="video/mp4"
+        proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=1024*1024)
+        def body():
+            try:
+                while True:
+                    chunk=proc.stdout.read(1024*256)
+                    if not chunk: break
+                    yield chunk
+            finally:
+                if proc.poll() is None: proc.terminate()
+                try: proc.wait(timeout=3)
+                except Exception: proc.kill()
+        headers={
+            "Content-Disposition":f'attachment; filename="{title}.{ext}"',
+            "Cache-Control":"no-store",
+            "X-Accel-Buffering":"no"
+        }
+        return StreamingResponse(body(),media_type=media,headers=headers)
     except Exception as e:
-        traceback.print_exc(); setj(jid,status="error",stage="Ошибка",error=str(e))
+        traceback.print_exc()
+        raise HTTPException(400,str(e))
 
-def cleanup():
-    while True:
-        time.sleep(600); now=time.time()
-        for jid,j in list(JOBS.items()):
-            if now-j["created"]>3600:
-                shutil.rmtree(TMP/jid,ignore_errors=True)
-                with LOCK:JOBS.pop(jid,None)
-threading.Thread(target=cleanup,daemon=True).start()
 start_xray()
 app.mount("/",StaticFiles(directory=BASE/"static",html=True),name="static")
