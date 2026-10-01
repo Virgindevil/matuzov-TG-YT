@@ -1,4 +1,4 @@
-import os,time,uuid,shutil,threading,traceback
+import os,time,uuid,shutil,threading,traceback,subprocess,json
 from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import FastAPI,HTTPException
@@ -11,6 +11,76 @@ BASE=Path(__file__).resolve().parent
 TMP=Path("/tmp/video_downloader"); TMP.mkdir(parents=True,exist_ok=True)
 SECRET_YT_COOKIES=Path("/etc/secrets/youtube.txt")
 WORK_YT_COOKIES=TMP/"youtube.txt"
+SECRET_VLESS=Path("/etc/secrets/vless.txt")
+XRAY_CONFIG=TMP/"xray.json"
+XRAY_PROC=None
+XRAY_ERROR=None
+
+def parse_vless_uri(uri):
+    from urllib.parse import urlsplit, parse_qs, unquote
+    p=urlsplit(uri.strip())
+    if p.scheme.lower()!="vless" or not p.username or not p.hostname or not p.port:
+        raise ValueError("Некорректный VLESS URL")
+    q={k:v[-1] for k,v in parse_qs(p.query).items()}
+    stream=q.get("type","tcp")
+    security=q.get("security","none")
+    outbound={
+        "protocol":"vless",
+        "settings":{"vnext":[{"address":p.hostname,"port":p.port,"users":[{
+            "id":unquote(p.username),"encryption":q.get("encryption","none"),
+            **({"flow":q["flow"]} if q.get("flow") else {})
+        }]}]},
+        "streamSettings":{"network":stream,"security":security}
+    }
+    ss=outbound["streamSettings"]
+    if security=="tls":
+        ss["tlsSettings"]={"serverName":q.get("sni",p.hostname),"allowInsecure":q.get("allowInsecure","0")=="1"}
+        if q.get("alpn"): ss["tlsSettings"]["alpn"]=q["alpn"].split(",")
+        if q.get("fp"): ss["tlsSettings"]["fingerprint"]=q["fp"]
+    elif security=="reality":
+        ss["realitySettings"]={
+            "serverName":q.get("sni",p.hostname),
+            "fingerprint":q.get("fp","chrome"),
+            "publicKey":q.get("pbk",""),
+            "shortId":q.get("sid",""),
+            "spiderX":unquote(q.get("spx",""))
+        }
+    if stream=="ws":
+        ss["wsSettings"]={"path":unquote(q.get("path","/")),"headers":{"Host":q.get("host",q.get("sni",p.hostname))}}
+    elif stream=="grpc":
+        ss["grpcSettings"]={"serviceName":unquote(q.get("serviceName",""))}
+    elif stream=="tcp" and q.get("headerType")=="http":
+        ss["tcpSettings"]={"header":{"type":"http","request":{"path":[unquote(q.get("path","/"))],"headers":{"Host":[q.get("host",p.hostname)]}}}}
+    return {
+        "log":{"loglevel":"warning"},
+        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}}],
+        "outbounds":[outbound,{"protocol":"freedom","tag":"direct"}]
+    }
+
+def start_xray():
+    global XRAY_PROC,XRAY_ERROR
+    if not SECRET_VLESS.is_file():
+        XRAY_ERROR="vless.txt не найден"
+        return False
+    try:
+        uri=SECRET_VLESS.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+        cfg=parse_vless_uri(uri)
+        XRAY_CONFIG.write_text(json.dumps(cfg,ensure_ascii=False),encoding="utf-8")
+        XRAY_PROC=subprocess.Popen(["xray","run","-config",str(XRAY_CONFIG)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
+        time.sleep(1)
+        if XRAY_PROC.poll() is not None:
+            err=(XRAY_PROC.stderr.read() if XRAY_PROC.stderr else "")[-500:]
+            XRAY_ERROR="Xray не запустился: "+err
+            return False
+        XRAY_ERROR=None
+        return True
+    except Exception as e:
+        XRAY_ERROR=str(e)
+        traceback.print_exc()
+        return False
+
+def xray_ready():
+    return XRAY_PROC is not None and XRAY_PROC.poll() is None
 
 def sync_youtube_cookies():
     if not SECRET_YT_COOKIES.is_file():
@@ -50,6 +120,8 @@ def opts(url=""):
         proxy = os.getenv("YOUTUBE_PROXY", "").strip()
         if proxy:
             options["proxy"] = proxy
+        elif xray_ready():
+            options["proxy"] = "socks5://127.0.0.1:1080"
 
     return options
 def setj(j,**kw):
@@ -65,6 +137,9 @@ def health():
         "youtube_cookies_writable": work is not None and os.access(work, os.W_OK),
         "youtube_cookies_size": work.stat().st_size if work is not None and work.is_file() else 0,
         "youtube_proxy_configured": bool(os.getenv("YOUTUBE_PROXY", "").strip()),
+        "vless_secret_file": SECRET_VLESS.is_file(),
+        "xray_running": xray_ready(),
+        "xray_error": XRAY_ERROR,
     }
 
 @app.post("/api/analyze")
@@ -146,4 +221,5 @@ def cleanup():
                 shutil.rmtree(TMP/jid,ignore_errors=True)
                 with LOCK:JOBS.pop(jid,None)
 threading.Thread(target=cleanup,daemon=True).start()
+start_xray()
 app.mount("/",StaticFiles(directory=BASE/"static",html=True),name="static")
