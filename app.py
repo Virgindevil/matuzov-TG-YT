@@ -11,12 +11,15 @@ BASE=Path(__file__).resolve().parent
 TMP=Path("/tmp/video_downloader"); TMP.mkdir(parents=True,exist_ok=True)
 SECRET_YT_COOKIES=Path("/etc/secrets/youtube.txt")
 WORK_YT_COOKIES=TMP/"youtube.txt"
+SECRET_TW_COOKIES=Path("/etc/secrets/twitter.txt")
+WORK_TW_COOKIES=TMP/"twitter.txt"
 SECRET_VLESS=Path("/etc/secrets/vless.txt")
 XRAY_CONFIG=TMP/"xray.json"
 XRAY_PROC=None
 XRAY_ERROR=None
 COOKIE_LOCK=threading.Lock()
 COOKIE_READY=False
+TW_COOKIE_READY=False
 
 def parse_vless_uri(uri):
     from urllib.parse import urlsplit, parse_qs, unquote
@@ -104,6 +107,24 @@ def sync_youtube_cookies(force=False):
             COOKIE_READY=False
             traceback.print_exc()
             return None
+def sync_twitter_cookies(force=False):
+    global TW_COOKIE_READY
+    if not SECRET_TW_COOKIES.is_file():
+        return None
+    with COOKIE_LOCK:
+        if TW_COOKIE_READY and WORK_TW_COOKIES.is_file() and not force:
+            return WORK_TW_COOKIES
+        try:
+            tmp_cookie=WORK_TW_COOKIES.with_suffix(".tmp")
+            shutil.copyfile(SECRET_TW_COOKIES,tmp_cookie)
+            os.replace(tmp_cookie,WORK_TW_COOKIES)
+            TW_COOKIE_READY=True
+            return WORK_TW_COOKIES
+        except Exception:
+            TW_COOKIE_READY=False
+            traceback.print_exc()
+            return None
+
 STREAM_SEM=threading.BoundedSemaphore(int(os.getenv("MAX_STREAMS","1")))
 app=FastAPI(title="Video Downloader v5")
 
@@ -135,10 +156,16 @@ def opts(url=""):
         elif xray_ready():
             options["proxy"] = "socks5://127.0.0.1:1080"
 
+    elif "x.com" in url or "twitter.com" in url:
+        cookies = sync_twitter_cookies()
+        if cookies is not None and cookies.is_file():
+            options["cookiefile"] = str(cookies)
+
     return options
 @app.get("/api/health")
 def health():
     work = sync_youtube_cookies()
+    tw_work = sync_twitter_cookies()
     return {
         "ok": True,
         "youtube_secret_file": SECRET_YT_COOKIES.is_file(),
@@ -146,6 +173,10 @@ def health():
         "youtube_cookies_writable": work is not None and os.access(work, os.W_OK),
         "youtube_cookies_size": work.stat().st_size if work is not None and work.is_file() else 0,
         "youtube_proxy_configured": bool(os.getenv("YOUTUBE_PROXY", "").strip()),
+        "twitter_secret_file": SECRET_TW_COOKIES.is_file(),
+        "twitter_cookies": tw_work is not None and tw_work.is_file(),
+        "twitter_cookies_writable": tw_work is not None and os.access(tw_work, os.W_OK),
+        "twitter_cookies_size": tw_work.stat().st_size if tw_work is not None and tw_work.is_file() else 0,
         "vless_secret_file": SECRET_VLESS.is_file(),
         "xray_running": xray_ready(),
         "xray_error": XRAY_ERROR,
@@ -257,6 +288,10 @@ def _ytdlp_pipe_cmd(u,format_id):
             cmd[1:1]=["--proxy",proxy]
         elif xray_ready():
             cmd[1:1]=["--proxy","socks5://127.0.0.1:1080"]
+    elif "x.com" in u or "twitter.com" in u:
+        cookies=sync_twitter_cookies()
+        if cookies is not None and cookies.is_file():
+            cmd[1:1]=["--cookies",str(cookies)]
     return cmd
 
 @app.api_route("/api/download",methods=["GET","HEAD"])
@@ -350,5 +385,6 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
         raise HTTPException(400,str(e))
 
 sync_youtube_cookies(force=True)
+sync_twitter_cookies(force=True)
 start_xray()
 app.mount("/",StaticFiles(directory=BASE/"static",html=True),name="static")
