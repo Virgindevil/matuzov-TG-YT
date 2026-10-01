@@ -1,18 +1,1 @@
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Video Downloader</title><link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-<main>
-  <h1>Video Downloader</h1>
-  <p class="muted">YouTube и другие сайты, которые поддерживает yt-dlp.</p>
-  <div class="row"><input id="url" placeholder="Вставьте ссылку на видео"><button id="go">Найти видео</button></div>
-  <section id="card" class="hidden">
-    <img id="thumb"><div class="info"><h2 id="title"></h2><p id="stage"></p>
-    <div class="bar"><i id="bar"></i></div><div id="formats"></div><a id="download" class="button hidden">Скачать готовый файл</a>
-    <pre id="error"></pre></div>
-  </section>
-</main><script src="/static/app.js"></script>
-</body></html>
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Downloader</title><link rel="stylesheet" href="/style.css"></head><body><main><header><div class="logo">VD</div><div><h1>Video Downloader</h1><p>С телефона или компьютера</p></div></header><section class="search"><input id="url" placeholder="Вставьте ссылку на видео…"><button id="find">Найти</button></section><div id="msg"></div><section id="card" class="card hidden"><img id="thumb"><div class="meta"><span id="source"></span><h2 id="title"></h2><div id="qualities"></div></div></section><section id="progress" class="card hidden"><div class="row"><b id="stage">Подготовка</b><b id="pct">0%</b></div><div class="bar"><i id="bar"></i></div><a id="download" class="download hidden">Скачать готовый файл</a></section><footer>Файлы временные и автоматически удаляются. Скачивайте только контент, который вам разрешено сохранять.</footer></main><script src="/app.js"></script></body></html>

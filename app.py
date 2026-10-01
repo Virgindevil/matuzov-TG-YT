@@ -1,148 +1,109 @@
-import os, time, uuid, threading
+import os,time,uuid,shutil,threading,traceback
 from pathlib import Path
-from typing import Optional, Any
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.staticfiles import StaticFiles
+from urllib.parse import urlparse
+from fastapi import FastAPI,HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, HttpUrl
-import boto3
-from botocore.config import Config
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import yt_dlp
 
-app = FastAPI(title="Universal Video Downloader API", version="1.0")
+BASE=Path(__file__).resolve().parent
+TMP=Path("/tmp/video_downloader"); TMP.mkdir(parents=True,exist_ok=True)
+JOBS={}; LOCK=threading.Lock(); SEM=threading.Semaphore(int(os.getenv("MAX_JOBS","1")))
+MAX_MB=int(os.getenv("MAX_FILE_MB","750"))
+app=FastAPI(title="Video Downloader v5")
 
-WORKER_TOKEN = os.getenv("WORKER_TOKEN", "").strip()
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
-R2_BUCKET = os.getenv("R2_BUCKET", "").strip()
-R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
-R2_LINK_TTL = int(os.getenv("R2_LINK_TTL", "86400"))
-JOB_TTL_HOURS = int(os.getenv("JOB_TTL_HOURS", "48"))
+class URLIn(BaseModel): url:str
+class DownloadIn(BaseModel): url:str; mode:str="best"
 
-lock = threading.RLock()
-jobs: dict[str, dict[str, Any]] = {}
+def valid(u):
+    u=u.strip(); p=urlparse(u)
+    if p.scheme not in ("http","https") or not p.netloc: raise HTTPException(400,"Некорректный URL")
+    return u
+def opts(): return {"quiet":True,"no_warnings":True,"noplaylist":True,"socket_timeout":20,"retries":3,"fragment_retries":3}
+def setj(j,**kw):
+    with LOCK: JOBS[j].update(kw)
 
-def now(): return int(time.time())
+@app.get("/api/health")
+def health(): return {"ok":True}
 
-def public_job(j):
-    keys = ("id","url","status","stage","progress","title","thumbnail","duration",
-            "formats","selected","error","download_url","filename","created_at","updated_at",
-            "worker_name")
-    return {k:j.get(k) for k in keys if k in j}
-
-def auth_worker(authorization: Optional[str]):
-    if not WORKER_TOKEN:
-        raise HTTPException(503, "WORKER_TOKEN is not configured")
-    if authorization != f"Bearer {WORKER_TOKEN}":
-        raise HTTPException(401, "Invalid worker token")
-
-def r2():
-    if not all([R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,R2_ENDPOINT]):
-        raise RuntimeError("R2 is not configured")
-    return boto3.client("s3", endpoint_url=R2_ENDPOINT,
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-        config=Config(signature_version="s3v4"))
-
-def presign(key):
-    return r2().generate_presigned_url("get_object",
-        Params={"Bucket":R2_BUCKET,"Key":key}, ExpiresIn=R2_LINK_TTL)
-
-def cleanup():
-    cutoff=now()-JOB_TTL_HOURS*3600
-    with lock:
-        dead=[jid for jid,j in jobs.items() if j.get("updated_at",0)<cutoff]
-        for jid in dead: jobs.pop(jid,None)
-
-class CreateJob(BaseModel):
-    url: HttpUrl
-
-class SelectFormat(BaseModel):
-    format_id: str
-
-class WorkerUpdate(BaseModel):
-    status: Optional[str]=None
-    stage: Optional[str]=None
-    progress: Optional[float]=None
-    title: Optional[str]=None
-    thumbnail: Optional[str]=None
-    duration: Optional[float]=None
-    formats: Optional[list[dict]]=None
-    filename: Optional[str]=None
-    r2_key: Optional[str]=None
-    error: Optional[str]=None
-    worker_name: Optional[str]=None
-
-@app.get("/health")
-def health():
-    return {"status":"ok","service":"universal-video-downloader",
-            "worker_auth_configured":bool(WORKER_TOKEN),
-            "r2_configured":all([R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET,R2_ENDPOINT]),
-            "queued":sum(1 for j in jobs.values() if j["status"] in ("queued","ready"))}
+@app.post("/api/analyze")
+def analyze(d:URLIn):
+    u=valid(d.url)
+    try:
+        with yt_dlp.YoutubeDL(opts()|{"skip_download":True}) as y: i=y.extract_info(u,download=False)
+        fs=i.get("formats") or []
+        hs=sorted({int(f["height"]) for f in fs if f.get("height") and f.get("vcodec") not in (None,"none")})
+        chosen=[]
+        for h in hs:
+            if not chosen or abs(h-chosen[-1])>8: chosen.append(h)
+            elif h>chosen[-1]: chosen[-1]=h
+        if len(chosen)>8:
+            ids={round(x*(len(chosen)-1)/7) for x in range(8)}; chosen=[chosen[x] for x in sorted(ids)]
+        q=[{"mode":f"video:{h}","label":"4K" if 2100<=h<=2200 else ("8K" if h>=4320 else f"{h}p")} for h in chosen]
+        if any(f.get("acodec") not in (None,"none") for f in fs): q.append({"mode":"audio","label":"MP3"})
+        q.append({"mode":"best","label":"Лучшее"})
+        return {"title":i.get("title") or "Видео","thumbnail":i.get("thumbnail"),"source":i.get("extractor_key") or i.get("extractor") or urlparse(u).hostname,"qualities":q}
+    except Exception as e: raise HTTPException(400,str(e))
 
 @app.post("/api/jobs")
-def create_job(body: CreateJob):
-    cleanup()
-    jid=uuid.uuid4().hex
-    j={"id":jid,"url":str(body.url),"status":"queued","stage":"Ожидание анализа",
-       "progress":0,"created_at":now(),"updated_at":now(),"formats":[]}
-    with lock: jobs[jid]=j
-    return public_job(j)
+def create(d:DownloadIn):
+    u=valid(d.url); jid=uuid.uuid4().hex
+    JOBS[jid]={"status":"queued","progress":0,"stage":"В очереди","error":None,"file":None,"name":None,"created":time.time()}
+    threading.Thread(target=worker,args=(jid,u,d.mode),daemon=True).start()
+    return {"job_id":jid}
 
 @app.get("/api/jobs/{jid}")
-def get_job(jid:str):
-    with lock: j=jobs.get(jid)
-    if not j: raise HTTPException(404,"Job not found")
-    # Refresh a presigned URL if an R2 key exists.
-    out=public_job(j)
-    if j.get("r2_key") and j.get("status")=="done":
-        try: out["download_url"]=presign(j["r2_key"])
-        except Exception: pass
-    return out
+def status(jid:str):
+    j=JOBS.get(jid)
+    if not j: raise HTTPException(404,"Задание не найдено")
+    return {k:v for k,v in j.items() if k!="file"}
 
-@app.post("/api/jobs/{jid}/select")
-def select_format(jid:str, body:SelectFormat):
-    with lock:
-        j=jobs.get(jid)
-        if not j: raise HTTPException(404,"Job not found")
-        if j.get("status")!="awaiting_selection":
-            raise HTTPException(409,"Job is not waiting for format selection")
-        valid={str(x.get("id")) for x in j.get("formats",[])}
-        if body.format_id not in valid:
-            raise HTTPException(400,"Unknown format")
-        j["selected"]=body.format_id
-        j["status"]="ready"; j["stage"]="Ожидание скачивания"; j["updated_at"]=now()
-        return public_job(j)
+@app.get("/api/jobs/{jid}/file")
+def file(jid:str):
+    j=JOBS.get(jid)
+    if not j or j["status"]!="done": raise HTTPException(404,"Файл ещё не готов")
+    p=Path(j["file"])
+    if not p.is_file(): raise HTTPException(410,"Временный файл уже удалён")
+    return FileResponse(p,filename=j["name"],media_type="application/octet-stream")
 
-@app.get("/worker/next")
-def worker_next(authorization: Optional[str]=Header(None), worker_name:str="worker"):
-    auth_worker(authorization); cleanup()
-    with lock:
-        # Analysis jobs first, then selected download jobs.
-        candidates=[j for j in jobs.values() if j["status"] in ("queued","ready")]
-        candidates.sort(key=lambda x:x["created_at"])
-        if not candidates: return {"job":None}
-        j=candidates[0]
-        j["status"]="analyzing" if j["status"]=="queued" else "downloading"
-        j["worker_name"]=worker_name
-        j["updated_at"]=now()
-        return {"job":dict(j)}
+def worker(jid,u,mode):
+    folder=TMP/jid; folder.mkdir(parents=True,exist_ok=True)
+    try:
+      with SEM:
+        setj(jid,status="working",stage="Подготовка",progress=1)
+        if mode=="audio": fmt="bestaudio/best"; merge=None; pp=[{"key":"FFmpegExtractAudio","preferredcodec":"mp3","preferredquality":"0"}]
+        elif mode.startswith("video:"):
+            h=int(mode.split(":")[1]); fmt=f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/bestvideo+bestaudio/best"; merge="mkv"; pp=[]
+        else: fmt="bestvideo+bestaudio/best"; merge="mkv"; pp=[]
+        peak=[1]
+        def hook(d):
+            if d.get("status")=="downloading":
+                inf=d.get("info_dict") or {}; aud=inf.get("vcodec")=="none" and inf.get("acodec") not in (None,"none")
+                base,span=(72,20) if aud else (2,70); total=d.get("total_bytes") or d.get("total_bytes_estimate") or 0; got=d.get("downloaded_bytes") or 0
+                fi=d.get("fragment_index") or 0; fc=d.get("fragment_count") or 0; ratio=fi/fc if fc else (got/total if total else 0)
+                p=max(peak[0],int(base+max(0,min(1,ratio))*span)); peak[0]=p
+                setj(jid,progress=p,stage="Скачивание аудио" if aud else "Скачивание видео")
+        def ph(d):
+            if d.get("status")=="started": setj(jid,progress=94,stage="Обработка FFmpeg")
+            elif d.get("status")=="finished": setj(jid,progress=98,stage="Завершение")
+        o=opts()|{"format":fmt,"outtmpl":str(folder/"%(title).160B [%(id)s].%(ext)s"),"progress_hooks":[hook],"postprocessor_hooks":[ph],"postprocessors":pp}
+        if merge:o["merge_output_format"]=merge
+        with yt_dlp.YoutubeDL(o) as y:y.extract_info(u,download=True)
+        files=[p for p in folder.iterdir() if p.is_file() and not p.name.endswith((".part",".ytdl"))]
+        if not files: raise RuntimeError("Готовый файл не найден")
+        final=max(files,key=lambda p:p.stat().st_mtime)
+        if final.stat().st_size>MAX_MB*1024*1024: raise RuntimeError(f"Файл больше серверного лимита {MAX_MB} МБ")
+        setj(jid,status="done",progress=100,stage="Готово",file=str(final),name=final.name)
+    except Exception as e:
+        traceback.print_exc(); setj(jid,status="error",stage="Ошибка",error=str(e))
 
-@app.post("/worker/jobs/{jid}")
-def worker_update(jid:str, body:WorkerUpdate, authorization: Optional[str]=Header(None)):
-    auth_worker(authorization)
-    with lock:
-        j=jobs.get(jid)
-        if not j: raise HTTPException(404,"Job not found")
-        data=body.model_dump(exclude_none=True)
-        if "progress" in data: data["progress"]=max(0,min(100,float(data["progress"])))
-        j.update(data); j["updated_at"]=now()
-        if j.get("r2_key") and j.get("status")=="done":
-            try: j["download_url"]=presign(j["r2_key"])
-            except Exception as e: j["error"]=f"R2 link error: {e}"
-        return public_job(j)
-
-static=Path(__file__).parent/"static"
-app.mount("/static", StaticFiles(directory=static), name="static")
-
-@app.get("/")
-def index(): return FileResponse(static/"index.html")
+def cleanup():
+    while True:
+        time.sleep(600); now=time.time()
+        for jid,j in list(JOBS.items()):
+            if now-j["created"]>3600:
+                shutil.rmtree(TMP/jid,ignore_errors=True)
+                with LOCK:JOBS.pop(jid,None)
+threading.Thread(target=cleanup,daemon=True).start()
+app.mount("/",StaticFiles(directory=BASE/"static",html=True),name="static")

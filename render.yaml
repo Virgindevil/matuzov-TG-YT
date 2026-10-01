@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: video-downloader-v5
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: MAX_JOBS
+        value: "1"
+      - key: MAX_FILE_MB
+        value: "750"
