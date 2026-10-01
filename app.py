@@ -9,6 +9,18 @@ import yt_dlp
 
 BASE=Path(__file__).resolve().parent
 TMP=Path("/tmp/video_downloader"); TMP.mkdir(parents=True,exist_ok=True)
+SECRET_YT_COOKIES=Path("/etc/secrets/youtube.txt")
+WORK_YT_COOKIES=TMP/"youtube.txt"
+
+def sync_youtube_cookies():
+    if not SECRET_YT_COOKIES.is_file():
+        return None
+    try:
+        shutil.copy2(SECRET_YT_COOKIES, WORK_YT_COOKIES)
+        return WORK_YT_COOKIES
+    except Exception:
+        traceback.print_exc()
+        return None
 JOBS={}; LOCK=threading.Lock(); SEM=threading.Semaphore(int(os.getenv("MAX_JOBS","1")))
 MAX_MB=int(os.getenv("MAX_FILE_MB","750"))
 app=FastAPI(title="Video Downloader v5")
@@ -31,8 +43,8 @@ def opts(url=""):
     }
 
     if "youtube.com" in url or "youtu.be" in url:
-        cookies = Path("/etc/secrets/youtube.txt")
-        if cookies.is_file():
+        cookies = sync_youtube_cookies()
+        if cookies is not None and cookies.is_file():
             options["cookiefile"] = str(cookies)
 
     return options
@@ -41,11 +53,13 @@ def setj(j,**kw):
 
 @app.get("/api/health")
 def health():
-    cookies = Path("/etc/secrets/youtube.txt")
+    work = sync_youtube_cookies()
     return {
         "ok": True,
-        "youtube_cookies": cookies.is_file(),
-        "youtube_cookies_size": cookies.stat().st_size if cookies.is_file() else 0,
+        "youtube_secret_file": SECRET_YT_COOKIES.is_file(),
+        "youtube_cookies": work is not None and work.is_file(),
+        "youtube_cookies_writable": work is not None and os.access(work, os.W_OK),
+        "youtube_cookies_size": work.stat().st_size if work is not None and work.is_file() else 0,
     }
 
 @app.post("/api/analyze")
