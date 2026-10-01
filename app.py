@@ -104,7 +104,7 @@ def sync_youtube_cookies(force=False):
             COOKIE_READY=False
             traceback.print_exc()
             return None
-JOBS={}; LOCK=threading.Lock(); SEM=threading.Semaphore(int(os.getenv("MAX_JOBS","1")))
+STREAM_SEM=threading.BoundedSemaphore(int(os.getenv("MAX_STREAMS","1")))
 app=FastAPI(title="Video Downloader v5")
 
 class URLIn(BaseModel): url:str
@@ -136,9 +136,6 @@ def opts(url=""):
             options["proxy"] = "socks5://127.0.0.1:1080"
 
     return options
-def setj(j,**kw):
-    with LOCK: JOBS[j].update(kw)
-
 @app.get("/api/health")
 def health():
     work = sync_youtube_cookies()
@@ -248,7 +245,7 @@ def analyze(d:URLIn):
 
 def _ytdlp_pipe_cmd(u,format_id):
     cmd=["yt-dlp","--quiet","--no-warnings","--no-playlist",
-         "--retries","10","--fragment-retries","10",
+         "--retries","10","--fragment-retries","10","--concurrent-fragments","1",
          "--retry-sleep","fragment:1:5","--socket-timeout","30",
          "-f",str(format_id),"-o","-",u]
     if "youtube.com" in u or "youtu.be" in u:
@@ -265,6 +262,9 @@ def _ytdlp_pipe_cmd(u,format_id):
 @app.api_route("/api/download",methods=["GET","HEAD"])
 def direct_download(url:str=Query(...),mode:str=Query("best")):
     u=valid(url)
+    if not STREAM_SEM.acquire(blocking=False):
+        raise HTTPException(429,"Уже идёт другая загрузка. Дождитесь её завершения.")
+    slot_held=True
     if mode not in ("best","audio") and not mode.startswith("video:"):
         raise HTTPException(400,"Некорректный режим")
     try:
@@ -289,6 +289,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             "X-Accel-Buffering":"no"
         }
         if mode=="HEAD":
+            STREAM_SEM.release(); slot_held=False
             return StreamingResponse(iter(()),media_type=media,headers=headers)
 
         readers=[]; writers=[]; downloaders=[]
@@ -338,8 +339,13 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                     except Exception:
                         try: p.kill()
                         except Exception: pass
+                STREAM_SEM.release()
+                slot_held=False
         return StreamingResponse(body(),media_type=media,headers=headers)
     except Exception as e:
+        if locals().get("slot_held",False):
+            try: STREAM_SEM.release()
+            except ValueError: pass
         traceback.print_exc()
         raise HTTPException(400,str(e))
 
