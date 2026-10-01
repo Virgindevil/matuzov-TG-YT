@@ -20,7 +20,23 @@ def valid(u):
     u=u.strip(); p=urlparse(u)
     if p.scheme not in ("http","https") or not p.netloc: raise HTTPException(400,"Некорректный URL")
     return u
-def opts(): return {"quiet":True,"no_warnings":True,"noplaylist":True,"socket_timeout":20,"retries":3,"fragment_retries":3}
+def opts(url=""):
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 20,
+        "retries": 3,
+        "fragment_retries": 3,
+    }
+
+    if "youtube.com" in url or "youtu.be" in url:
+        cookies = Path("/etc/secrets/youtube.txt")
+
+        if cookies.is_file():
+            options["cookiefile"] = str(cookies)
+
+    return options
 def setj(j,**kw):
     with LOCK: JOBS[j].update(kw)
 
