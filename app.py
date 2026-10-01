@@ -233,42 +233,41 @@ def analyze(d:URLIn):
         return {"title":i.get("title") or "Видео","thumbnail":i.get("thumbnail"),"source":i.get("extractor_key") or i.get("extractor") or urlparse(u).hostname,"qualities":q}
     except Exception as e: raise HTTPException(400,str(e))
 
-@app.get("/api/download")
+def _ytdlp_pipe_cmd(u,format_id):
+    cmd=["yt-dlp","--quiet","--no-warnings","--no-playlist",
+         "--retries","10","--fragment-retries","10",
+         "--retry-sleep","fragment:1:5","--socket-timeout","30",
+         "-f",str(format_id),"-o","-",u]
+    if "youtube.com" in u or "youtu.be" in u:
+        cookies=sync_youtube_cookies()
+        if cookies is not None and cookies.is_file():
+            cmd[1:1]=["--cookies",str(cookies)]
+        proxy=os.getenv("YOUTUBE_PROXY","").strip()
+        if proxy:
+            cmd[1:1]=["--proxy",proxy]
+        elif xray_ready():
+            cmd[1:1]=["--proxy","socks5://127.0.0.1:1080"]
+    return cmd
+
+@app.api_route("/api/download",methods=["GET","HEAD"])
 def direct_download(url:str=Query(...),mode:str=Query("best")):
     u=valid(url)
+    if mode not in ("best","audio") and not mode.startswith("video:"):
+        raise HTTPException(400,"Некорректный режим")
     try:
-        # Metadata only. Nothing is downloaded to Render's disk.
+        # yt-dlp handles the remote YouTube/CDN connection and retries.
+        # FFmpeg only reads local OS pipes, so a googlevideo redirect cannot break FFmpeg.
         with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True}) as y:
             info=y.extract_info(u,download=False)
         v,a,_=_pick_streams(info,mode)
         title=_safe_name(info.get("title"))
-        cmd=["ffmpeg","-hide_banner","-loglevel","error"]
-        proxy=["-http_proxy","http://127.0.0.1:1081"] if xray_ready() else []
         if mode=="audio":
-            cmd+=proxy+["-i",a["url"],"-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
+            selected=[a]
             ext="mp3"; media="audio/mpeg"
         else:
-            cmd+=proxy+["-i",v["url"]]
-            if a:
-                cmd+=proxy+["-i",a["url"],"-map","0:v:0","-map","1:a:0"]
-            else:
-                cmd+=["-map","0:v:0","-map","0:a?"]
-            # Fragmented MP4 can be written to stdout, so the browser receives bytes immediately.
-            cmd+=["-c","copy","-movflags","frag_keyframe+empty_moov+default_base_moof","-f","mp4","pipe:1"]
-            ext="mp4"; media="video/mp4"
-        proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
-        def body():
-            try:
-                while True:
-                    chunk=proc.stdout.read(1024*256)
-                    if not chunk: break
-                    yield chunk
-            finally:
-                if proc.poll() is None: proc.terminate()
-                try: proc.wait(timeout=3)
-                except Exception: proc.kill()
-        # HTTP headers in Starlette are latin-1 encoded. Keep an ASCII fallback
-        # and send the real Unicode filename via RFC 5987 filename*.
+            selected=[v]+([a] if a else [])
+            ext="mkv"; media="video/x-matroska"
+
         ascii_title="".join(c if ord(c)<128 and c not in '"\\' else "_" for c in title).strip(" ._") or "video"
         unicode_name=quote(f"{title}.{ext}",safe="")
         headers={
@@ -276,6 +275,56 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             "Cache-Control":"no-store",
             "X-Accel-Buffering":"no"
         }
+        if mode=="HEAD":
+            return StreamingResponse(iter(()),media_type=media,headers=headers)
+
+        readers=[]; writers=[]; downloaders=[]
+        for f in selected:
+            rd,wr=os.pipe()
+            readers.append(rd); writers.append(wr)
+        try:
+            for f,wr in zip(selected,writers):
+                p=subprocess.Popen(_ytdlp_pipe_cmd(u,f["format_id"]),stdout=wr,stderr=None,close_fds=True)
+                downloaders.append(p)
+                os.close(wr)
+            writers=[]
+
+            cmd=["ffmpeg","-hide_banner","-loglevel","warning"]
+            for rd in readers:
+                cmd+=["-i",f"pipe:{rd}"]
+            if mode=="audio":
+                cmd+=["-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
+            else:
+                cmd+=["-map","0:v:0"]
+                if len(readers)>1: cmd+=["-map","1:a:0"]
+                else: cmd+=["-map","0:a?"]
+                cmd+=["-c","copy","-f","matroska","pipe:1"]
+            ff=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0,pass_fds=tuple(readers))
+        finally:
+            for fd in readers:
+                try: os.close(fd)
+                except OSError: pass
+            for fd in writers:
+                try: os.close(fd)
+                except OSError: pass
+
+        def body():
+            try:
+                while True:
+                    chunk=ff.stdout.read(1024*256)
+                    if not chunk: break
+                    yield chunk
+            finally:
+                if ff.poll() is None: ff.terminate()
+                for p in downloaders:
+                    if p.poll() is None: p.terminate()
+                try: ff.wait(timeout=3)
+                except Exception: ff.kill()
+                for p in downloaders:
+                    try: p.wait(timeout=2)
+                    except Exception:
+                        try: p.kill()
+                        except Exception: pass
         return StreamingResponse(body(),media_type=media,headers=headers)
     except Exception as e:
         traceback.print_exc()
