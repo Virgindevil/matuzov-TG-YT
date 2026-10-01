@@ -32,7 +32,6 @@ def opts(url=""):
 
     if "youtube.com" in url or "youtu.be" in url:
         cookies = Path("/etc/secrets/youtube.txt")
-
         if cookies.is_file():
             options["cookiefile"] = str(cookies)
 
@@ -41,13 +40,19 @@ def setj(j,**kw):
     with LOCK: JOBS[j].update(kw)
 
 @app.get("/api/health")
-def health(): return {"ok":True}
+def health():
+    cookies = Path("/etc/secrets/youtube.txt")
+    return {
+        "ok": True,
+        "youtube_cookies": cookies.is_file(),
+        "youtube_cookies_size": cookies.stat().st_size if cookies.is_file() else 0,
+    }
 
 @app.post("/api/analyze")
 def analyze(d:URLIn):
     u=valid(d.url)
     try:
-        with yt_dlp.YoutubeDL(opts()|{"skip_download":True}) as y: i=y.extract_info(u,download=False)
+        with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True}) as y: i=y.extract_info(u,download=False)
         fs=i.get("formats") or []
         hs=sorted({int(f["height"]) for f in fs if f.get("height") and f.get("vcodec") not in (None,"none")})
         chosen=[]
@@ -103,7 +108,7 @@ def worker(jid,u,mode):
         def ph(d):
             if d.get("status")=="started": setj(jid,progress=94,stage="Обработка FFmpeg")
             elif d.get("status")=="finished": setj(jid,progress=98,stage="Завершение")
-        o=opts()|{"format":fmt,"outtmpl":str(folder/"%(title).160B [%(id)s].%(ext)s"),"progress_hooks":[hook],"postprocessor_hooks":[ph],"postprocessors":pp}
+        o=opts(u)|{"format":fmt,"outtmpl":str(folder/"%(title).160B [%(id)s].%(ext)s"),"progress_hooks":[hook],"postprocessor_hooks":[ph],"postprocessors":pp}
         if merge:o["merge_output_format"]=merge
         with yt_dlp.YoutubeDL(o) as y:y.extract_info(u,download=True)
         files=[p for p in folder.iterdir() if p.is_file() and not p.name.endswith((".part",".ytdl"))]
