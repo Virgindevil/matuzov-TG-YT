@@ -53,7 +53,7 @@ def parse_vless_uri(uri):
         ss["tcpSettings"]={"header":{"type":"http","request":{"path":[unquote(q.get("path","/"))],"headers":{"Host":[q.get("host",p.hostname)]}}}}
     return {
         "log":{"loglevel":"warning"},
-        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}},{"listen":"127.0.0.1","port":1081,"protocol":"http","settings":{}}],
+        "inbounds":[{"listen":"127.0.0.1","port":1080,"protocol":"socks","settings":{"udp":True}}],
         "outbounds":[outbound,{"protocol":"freedom","tag":"direct"}]
     }
 
@@ -175,10 +175,6 @@ def _safe_name(name):
     s="".join("_" if c in bad else c for c in (name or "video"))
     return s.strip(" .")[:150] or "video"
 
-def _ffmpeg_proxy_args():
-    # ffmpeg understands an HTTP proxy. Xray exposes one locally on 1081.
-    return ["-http_proxy","http://127.0.0.1:1081"] if xray_ready() else []
-
 @app.post("/api/analyze")
 def analyze(d:URLIn):
     u=valid(d.url)
@@ -222,7 +218,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
         v,a,_=_pick_streams(info,mode)
         title=_safe_name(info.get("title"))
         cmd=["ffmpeg","-hide_banner","-loglevel","error"]
-        proxy=_ffmpeg_proxy_args()
+        proxy=[]
         if mode=="audio":
             cmd+=proxy+["-i",a["url"],"-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
             ext="mp3"; media="audio/mpeg"
