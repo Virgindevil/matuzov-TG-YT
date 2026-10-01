@@ -1,6 +1,6 @@
 import os,time,uuid,shutil,threading,traceback,subprocess,json
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse,quote
 from fastapi import FastAPI,HTTPException,Query
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -267,8 +267,12 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                 if proc.poll() is None: proc.terminate()
                 try: proc.wait(timeout=3)
                 except Exception: proc.kill()
+        # HTTP headers in Starlette are latin-1 encoded. Keep an ASCII fallback
+        # and send the real Unicode filename via RFC 5987 filename*.
+        ascii_title="".join(c if ord(c)<128 and c not in '"\\' else "_" for c in title).strip(" ._") or "video"
+        unicode_name=quote(f"{title}.{ext}",safe="")
         headers={
-            "Content-Disposition":f'attachment; filename="{title}.{ext}"',
+            "Content-Disposition":f'attachment; filename="{ascii_title}.{ext}"; filename*=UTF-8\'\'{unicode_name}',
             "Cache-Control":"no-store",
             "X-Accel-Buffering":"no"
         }
