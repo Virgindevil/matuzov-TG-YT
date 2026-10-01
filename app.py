@@ -92,7 +92,6 @@ def sync_youtube_cookies():
         traceback.print_exc()
         return None
 JOBS={}; LOCK=threading.Lock(); SEM=threading.Semaphore(int(os.getenv("MAX_JOBS","1")))
-MAX_MB=int(os.getenv("MAX_FILE_MB","750"))
 app=FastAPI(title="Video Downloader v5")
 
 class URLIn(BaseModel): url:str
@@ -155,9 +154,24 @@ def analyze(d:URLIn):
             elif h>chosen[-1]: chosen[-1]=h
         if len(chosen)>8:
             ids={round(x*(len(chosen)-1)/7) for x in range(8)}; chosen=[chosen[x] for x in sorted(ids)]
-        q=[{"mode":f"video:{h}","label":"4K" if 2100<=h<=2200 else ("8K" if h>=4320 else f"{h}p")} for h in chosen]
-        if any(f.get("acodec") not in (None,"none") for f in fs): q.append({"mode":"audio","label":"MP3"})
-        q.append({"mode":"best","label":"Лучшее"})
+        duration=float(i.get("duration") or 0)
+        def fsize(f):
+            size=f.get("filesize") or f.get("filesize_approx")
+            if size: return int(size)
+            tbr=f.get("tbr")
+            return int(float(tbr)*1000/8*duration) if tbr and duration else 0
+        audios=[f for f in fs if f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
+        best_audio=max(audios,key=lambda f:(f.get("abr") or f.get("tbr") or 0),default=None)
+        audio_size=fsize(best_audio) if best_audio else 0
+        q=[]
+        for h in chosen:
+            vids=[f for f in fs if f.get("height") and int(f["height"])<=h and f.get("vcodec") not in (None,"none")]
+            best_video=max(vids,key=lambda f:(int(f.get("height") or 0),f.get("tbr") or 0),default=None)
+            size=(fsize(best_video) if best_video else 0)+audio_size
+            q.append({"mode":f"video:{h}","label":"4K" if 2100<=h<=2200 else ("8K" if h>=4320 else f"{h}p"),"size":size or None})
+        if audios: q.append({"mode":"audio","label":"MP3","size":audio_size or None})
+        best_size=max((x.get("size") or 0 for x in q if x["mode"].startswith("video:")),default=0)
+        q.append({"mode":"best","label":"Лучшее","size":best_size or None})
         return {"title":i.get("title") or "Видео","thumbnail":i.get("thumbnail"),"source":i.get("extractor_key") or i.get("extractor") or urlparse(u).hostname,"qualities":q}
     except Exception as e: raise HTTPException(400,str(e))
 
@@ -208,7 +222,6 @@ def worker(jid,u,mode):
         files=[p for p in folder.iterdir() if p.is_file() and not p.name.endswith((".part",".ytdl"))]
         if not files: raise RuntimeError("Готовый файл не найден")
         final=max(files,key=lambda p:p.stat().st_mtime)
-        if final.stat().st_size>MAX_MB*1024*1024: raise RuntimeError(f"Файл больше серверного лимита {MAX_MB} МБ")
         setj(jid,status="done",progress=100,stage="Готово",file=str(final),name=final.name)
     except Exception as e:
         traceback.print_exc(); setj(jid,status="error",stage="Ошибка",error=str(e))
