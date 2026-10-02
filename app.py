@@ -280,7 +280,7 @@ def _ytdlp_pipe_cmd(u,format_id,video_pipe=False):
          "--retry-sleep","fragment:1:5","--socket-timeout","30",
          "-f",str(format_id)]
     if video_pipe:
-        cmd+=["--downloader","ffmpeg","--downloader-args","ffmpeg_i:-fflags +genpts","--remux-video","mpegts"]
+        cmd+=["--downloader","ffmpeg","--downloader-args","ffmpeg_i:-fflags +genpts;ffmpeg_o:-f mpegts"]
     cmd+=["-o","-",u]
     if "youtube.com" in u or "youtu.be" in u:
         cookies=sync_youtube_cookies()
