@@ -338,7 +338,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                 os.close(wr)
             writers=[]
 
-            cmd=["ffmpeg","-hide_banner","-loglevel","warning"]
+            cmd=["ffmpeg","-hide_banner","-loglevel","warning","-fflags","+genpts"]
             for rd in readers:
                 cmd+=["-i",f"pipe:{rd}"]
             if mode=="audio":
@@ -347,7 +347,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                 cmd+=["-map","0:v:0"]
                 if len(readers)>1: cmd+=["-map","1:a:0"]
                 else: cmd+=["-map","0:a?"]
-                cmd+=["-c","copy","-f","matroska","pipe:1"]
+                cmd+=["-c","copy","-avoid_negative_ts","make_zero","-f","matroska","pipe:1"]
             ff=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0,pass_fds=tuple(readers))
         finally:
             for fd in readers:
