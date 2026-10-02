@@ -328,53 +328,46 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             STREAM_SEM.release(); slot_held=False
             return StreamingResponse(iter(()),media_type=media,headers=headers)
 
-        readers=[]; writers=[]; downloaders=[]
-        for f in selected:
-            rd,wr=os.pipe()
-            readers.append(rd); writers.append(wr)
-        try:
-            for f,wr in zip(selected,writers):
-                p=subprocess.Popen(_ytdlp_pipe_cmd(u,f["format_id"]),stdout=wr,stderr=None,close_fds=True)
-                downloaders.append(p)
-                os.close(wr)
-            writers=[]
-
-            cmd=["ffmpeg","-hide_banner","-loglevel","warning","-fflags","+genpts"]
-            for idx,rd in enumerate(readers):
-                if mode!="audio" and idx==0:
-                    fps=float(v.get("fps") or 30)
-                    if fps<=0 or fps>240: fps=30
-                    cmd+=["-r",str(fps)]
-                cmd+=["-i",f"pipe:{rd}"]
-            if mode=="audio":
-                cmd+=["-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
+        # Let yt-dlp own format downloading and merging. Piping individual
+        # YouTube formats into our own ffmpeg loses timestamps for some formats.
+        if mode=="audio":
+            fmt=str(a["format_id"])
+            cmd=_ytdlp_pipe_cmd(u,fmt)
+            # yt-dlp writes the selected audio stream to stdout; transcode to MP3 here.
+            ytdlp=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
+            ff=subprocess.Popen(
+                ["ffmpeg","-hide_banner","-loglevel","warning","-i","pipe:0",
+                 "-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"],
+                stdin=ytdlp.stdout,stdout=subprocess.PIPE,stderr=None,bufsize=0
+            )
+            ytdlp.stdout.close()
+            producer=ff
+            helpers=[ytdlp]
+        else:
+            # Ask yt-dlp to merge video+audio itself and stream the final Matroska
+            # file to stdout. This preserves yt-dlp's native timestamp handling.
+            if a:
+                fmt=f'{v["format_id"]}+{a["format_id"]}'
             else:
-                cmd+=["-map","0:v:0"]
-                if len(readers)>1: cmd+=["-map","1:a:0"]
-                else: cmd+=["-map","0:a?"]
-                cmd+=["-c","copy","-avoid_negative_ts","make_zero","-f","matroska","pipe:1"]
-            ff=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0,pass_fds=tuple(readers))
-        finally:
-            for fd in readers:
-                try: os.close(fd)
-                except OSError: pass
-            for fd in writers:
-                try: os.close(fd)
-                except OSError: pass
+                fmt=str(v["format_id"])
+            cmd=_ytdlp_pipe_cmd(u,fmt)
+            cmd[1:1]=["--merge-output-format","mkv"]
+            producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
+            helpers=[]
 
         def body():
             try:
                 while True:
-                    chunk=ff.stdout.read(1024*256)
+                    chunk=producer.stdout.read(1024*256)
                     if not chunk: break
                     yield chunk
             finally:
-                if ff.poll() is None: ff.terminate()
-                for p in downloaders:
+                if producer.poll() is None: producer.terminate()
+                for p in helpers:
                     if p.poll() is None: p.terminate()
-                try: ff.wait(timeout=3)
-                except Exception: ff.kill()
-                for p in downloaders:
+                try: producer.wait(timeout=3)
+                except Exception: producer.kill()
+                for p in helpers:
                     try: p.wait(timeout=2)
                     except Exception:
                         try: p.kill()
