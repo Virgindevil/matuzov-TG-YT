@@ -274,13 +274,11 @@ def analyze(d:URLIn):
         return {"title":i.get("title") or "Видео","thumbnail":i.get("thumbnail"),"source":i.get("extractor_key") or i.get("extractor") or urlparse(u).hostname,"qualities":q}
     except Exception as e: raise HTTPException(400,str(e))
 
-def _ytdlp_pipe_cmd(u,format_id,video_pipe=False):
+def _ytdlp_pipe_cmd(u,format_id):
     cmd=["yt-dlp","--quiet","--no-warnings","--no-playlist",
          "--retries","10","--fragment-retries","10","--concurrent-fragments","1",
          "--retry-sleep","fragment:1:5","--socket-timeout","30",
          "-f",str(format_id)]
-    if video_pipe:
-        cmd+=["--downloader","ffmpeg","--downloader-args","ffmpeg_i:-fflags +genpts;ffmpeg_o:-f mpegts"]
     cmd+=["-o","-",u]
     if "youtube.com" in u or "youtu.be" in u:
         cookies=sync_youtube_cookies()
@@ -335,15 +333,18 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             rd,wr=os.pipe()
             readers.append(rd); writers.append(wr)
         try:
-            for idx,(f,wr) in enumerate(zip(selected,writers)):
-                video_pipe=(mode!="audio" and idx==0)
-                p=subprocess.Popen(_ytdlp_pipe_cmd(u,f["format_id"],video_pipe=video_pipe),stdout=wr,stderr=None,close_fds=True)
+            for f,wr in zip(selected,writers):
+                p=subprocess.Popen(_ytdlp_pipe_cmd(u,f["format_id"]),stdout=wr,stderr=None,close_fds=True)
                 downloaders.append(p)
                 os.close(wr)
             writers=[]
 
             cmd=["ffmpeg","-hide_banner","-loglevel","warning","-fflags","+genpts"]
-            for rd in readers:
+            for idx,rd in enumerate(readers):
+                if mode!="audio" and idx==0:
+                    fps=float(v.get("fps") or 30)
+                    if fps<=0 or fps>240: fps=30
+                    cmd+=["-r",str(fps)]
                 cmd+=["-i",f"pipe:{rd}"]
             if mode=="audio":
                 cmd+=["-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"]
