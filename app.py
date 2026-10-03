@@ -295,14 +295,23 @@ def _ytdlp_pipe_cmd(u,format_id):
             cmd[1:1]=["--cookies",str(cookies)]
     return cmd
 
-@app.api_route("/api/download",methods=["GET","HEAD"])
+@app.head("/api/download")
+def direct_download_head(url:str=Query(...),mode:str=Query("best")):
+    u=valid(url)
+    if mode not in ("best","audio") and not mode.startswith("video:"):
+        raise HTTPException(400,"Некорректный режим")
+    ext="mp3" if mode=="audio" else "mkv"
+    media="audio/mpeg" if mode=="audio" else "video/x-matroska"
+    return StreamingResponse(iter(()),media_type=media,headers={"Cache-Control":"no-store","X-Accel-Buffering":"no"})
+
+@app.get("/api/download")
 def direct_download(url:str=Query(...),mode:str=Query("best")):
     u=valid(url)
+    if mode not in ("best","audio") and not mode.startswith("video:"):
+        raise HTTPException(400,"Некорректный режим")
     if not STREAM_SEM.acquire(blocking=False):
         raise HTTPException(429,"Уже идёт другая загрузка. Дождитесь её завершения.")
     slot_held=True
-    if mode not in ("best","audio") and not mode.startswith("video:"):
-        raise HTTPException(400,"Некорректный режим")
     try:
         # yt-dlp handles the remote YouTube/CDN connection and retries.
         # FFmpeg only reads local OS pipes, so a googlevideo redirect cannot break FFmpeg.
@@ -324,10 +333,6 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             "Cache-Control":"no-store",
             "X-Accel-Buffering":"no"
         }
-        if mode=="HEAD":
-            STREAM_SEM.release(); slot_held=False
-            return StreamingResponse(iter(()),media_type=media,headers=headers)
-
         # Let yt-dlp own format downloading and merging. Piping individual
         # YouTube formats into our own ffmpeg loses timestamps for some formats.
         if mode=="audio":
@@ -375,8 +380,8 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                     except Exception:
                         try: p.kill()
                         except Exception: pass
-                STREAM_SEM.release()
-                slot_held=False
+                try: STREAM_SEM.release()
+                except ValueError: pass
         return StreamingResponse(body(),media_type=media,headers=headers)
     except Exception as e:
         if locals().get("slot_held",False):
