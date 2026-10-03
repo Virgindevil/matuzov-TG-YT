@@ -372,7 +372,11 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                         cmd[pi+1]="http://127.0.0.1:1081"
                 except ValueError:
                     cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
-            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mkv"]
+            # Keep verbose diagnostics temporarily: some YouTube formats (notably
+            # HLS) behave differently from direct media formats, and ffmpeg's numeric
+            # exit code alone is not enough to distinguish the failure.
+            cmd=[x for x in cmd if x!="--quiet"]
+            cmd[1:1]=["--verbose","--downloader","ffmpeg","--merge-output-format","mkv"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
 
