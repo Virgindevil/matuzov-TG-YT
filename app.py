@@ -351,7 +351,10 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             else:
                 fmt=str(v["format_id"])
             cmd=_ytdlp_pipe_cmd(u,fmt)
-            cmd[1:1]=["--merge-output-format","mkv"]
+            # yt-dlp explicitly recommends the ffmpeg downloader when multiple
+            # formats are streamed to stdout. It downloads and merges them in
+            # one ffmpeg operation instead of post-processing a non-seekable "-".
+            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mkv"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
 
