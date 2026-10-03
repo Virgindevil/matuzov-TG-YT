@@ -245,7 +245,7 @@ def network_test():
 def analyze(d:URLIn):
     u=valid(d.url)
     try:
-        with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True}) as y: i=y.extract_info(u,download=False)
+        with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True,"format":None}) as y: i=y.extract_info(u,download=False)
         fs=i.get("formats") or []
         hs=sorted({int(f["height"]) for f in fs if f.get("height") and f.get("vcodec") not in (None,"none")})
         chosen=[]
@@ -360,7 +360,6 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             # ffmpeg failure and leaves only "exited with code 183". Remove quiet
             # for this subprocess and enable verbose output so Render logs contain
             # the exact ffmpeg error/command. Secrets/cookie contents are not printed.
-            cmd=[x for x in cmd if x!="--quiet"]
             # ffmpeg cannot use the SOCKS proxy that yt-dlp normally uses.
             # The signed YouTube URLs were created through Xray, but ffmpeg then
             # fetched them directly from Render, so Google returned 403. For the
@@ -373,7 +372,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                         cmd[pi+1]="http://127.0.0.1:1081"
                 except ValueError:
                     cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
-            cmd[1:1]=["--verbose","--downloader","ffmpeg","--merge-output-format","mkv"]
+            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mkv"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
 
