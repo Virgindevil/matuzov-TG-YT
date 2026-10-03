@@ -361,6 +361,18 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             # for this subprocess and enable verbose output so Render logs contain
             # the exact ffmpeg error/command. Secrets/cookie contents are not printed.
             cmd=[x for x in cmd if x!="--quiet"]
+            # ffmpeg cannot use the SOCKS proxy that yt-dlp normally uses.
+            # The signed YouTube URLs were created through Xray, but ffmpeg then
+            # fetched them directly from Render, so Google returned 403. For the
+            # ffmpeg downloader use Xray's HTTP inbound instead, keeping the same
+            # exit IP for extraction and media requests.
+            if xray_ready():
+                try:
+                    pi=cmd.index("--proxy")
+                    if pi+1 < len(cmd):
+                        cmd[pi+1]="http://127.0.0.1:1081"
+                except ValueError:
+                    cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
             cmd[1:1]=["--verbose","--downloader","ffmpeg","--merge-output-format","mkv"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
