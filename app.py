@@ -203,8 +203,14 @@ def _pick_streams(info,mode):
         h=max([int(f.get("height") or 0) for f in fs if f.get("vcodec") not in (None,"none")],default=0)
     vids=[f for f in fs if f.get("url") and f.get("vcodec") not in (None,"none") and int(f.get("height") or 0)<=h]
     if not vids: raise RuntimeError("Видеопоток не найден")
-    # Prefer the requested height, then higher bitrate. Separate video-only is fine: audio is added below.
-    v=max(vids,key=lambda f:(int(f.get("height") or 0),f.get("tbr") or 0))
+    # Prefer direct HTTP/DASH over HLS at the same resolution. Some YouTube HLS
+    # variants (e.g. itag 312) expose initial packets without timestamps; ffmpeg
+    # then cannot mux them to a non-seekable Matroska stdout stream.
+    def video_rank(f):
+        proto=str(f.get("protocol") or "").lower()
+        is_hls = "m3u8" in proto or str(f.get("url") or "").lower().endswith(".m3u8")
+        return (int(f.get("height") or 0), 0 if is_hls else 1, f.get("tbr") or 0)
+    v=max(vids,key=video_rank)
     if v.get("acodec") not in (None,"none"):
         return v,None,_fmt_size(v,duration)
     aud=[f for f in fs if f.get("url") and f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
@@ -372,11 +378,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                         cmd[pi+1]="http://127.0.0.1:1081"
                 except ValueError:
                     cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
-            # Keep verbose diagnostics temporarily: some YouTube formats (notably
-            # HLS) behave differently from direct media formats, and ffmpeg's numeric
-            # exit code alone is not enough to distinguish the failure.
-            cmd=[x for x in cmd if x!="--quiet"]
-            cmd[1:1]=["--verbose","--downloader","ffmpeg","--merge-output-format","mkv"]
+            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mkv"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
 
