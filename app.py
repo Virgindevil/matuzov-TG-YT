@@ -2,7 +2,8 @@ import os,time,uuid,shutil,threading,traceback,subprocess,json
 from pathlib import Path
 from urllib.parse import urlparse,quote
 from fastapi import FastAPI,HTTPException,Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse,FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
@@ -301,6 +302,16 @@ def _ytdlp_pipe_cmd(u,format_id):
             cmd[1:1]=["--cookies",str(cookies)]
     return cmd
 
+def _verified_video(path):
+    p=subprocess.run(["ffprobe","-v","error","-select_streams","v:0",
+        "-show_entries","stream=codec_type,width,height","-of","json",str(path)],
+        capture_output=True,text=True,timeout=60)
+    if p.returncode!=0:
+        raise RuntimeError("FFprobe: "+p.stderr[-500:])
+    streams=json.loads(p.stdout).get("streams",[])
+    if not streams or not streams[0].get("width"):
+        raise RuntimeError("Итоговый файл не содержит видеопоток")
+
 @app.head("/api/download")
 def direct_download_head(url:str=Query(...),mode:str=Query("best")):
     u=valid(url)
@@ -355,33 +366,44 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             producer=ff
             helpers=[ytdlp]
         else:
-            # Ask yt-dlp to merge video+audio into a fragmented MP4 stream.
-            # Fragmented MP4 supports non-seekable stdout without temporary files.
-            if a:
-                fmt=f'{v["format_id"]}+{a["format_id"]}'
-            else:
-                fmt=str(v["format_id"])
-            cmd=_ytdlp_pipe_cmd(u,fmt)
-            # Diagnostic: yt-dlp normally runs with --quiet, which hides the real
-            # ffmpeg failure and leaves only "exited with code 183". Remove quiet
-            # for this subprocess and enable verbose output so Render logs contain
-            # the exact ffmpeg error/command. Secrets/cookie contents are not printed.
-            # ffmpeg cannot use the SOCKS proxy that yt-dlp normally uses.
-            # The signed YouTube URLs were created through Xray, but ffmpeg then
-            # fetched them directly from Render, so Google returned 403. For the
-            # ffmpeg downloader use Xray's HTTP inbound instead, keeping the same
-            # exit IP for extraction and media requests.
-            if xray_ready():
-                try:
-                    pi=cmd.index("--proxy")
-                    if pi+1 < len(cmd):
-                        cmd[pi+1]="http://127.0.0.1:1081"
-                except ValueError:
-                    cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
-            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mp4",
-                      "--postprocessor-args","Merger+ffmpeg_o:-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +frag_keyframe+empty_moov"]
-            producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
-            helpers=[]
+            # Download to a private temporary directory before sending HTTP headers.
+            # yt-dlp handles all media requests (and proxy/cookies) itself.
+            jobdir=TMP/("job_"+uuid.uuid4().hex)
+            jobdir.mkdir(parents=True,exist_ok=False)
+            try:
+                fmt=f'{v["format_id"]}+{a["format_id"]}' if a else str(v["format_id"])
+                settings=opts(u)|{
+                    "format":fmt,
+                    "outtmpl":str(jobdir/"video.%(ext)s"),
+                    "merge_output_format":"mp4",
+                    "noplaylist":True,
+                }
+                with yt_dlp.YoutubeDL(settings) as downloader:
+                    result=downloader.extract_info(u,download=True)
+                candidates=sorted(jobdir.glob("video.*"))
+                candidates=[p for p in candidates if p.suffix.lower() in (".mp4",".mkv",".webm")]
+                if len(candidates)!=1:
+                    raise RuntimeError("Не удалось определить итоговый видеофайл")
+                source=candidates[0]
+                final=jobdir/"final.mp4"
+                # Remux on disk. Transcode only when codecs cannot be copied into MP4.
+                copy_cmd=["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(source),
+                          "-map","0:v:0","-map","0:a:0?", "-c","copy","-movflags","+faststart",str(final)]
+                p=subprocess.run(copy_cmd,capture_output=True,text=True)
+                if p.returncode!=0:
+                    p=subprocess.run(["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(source),
+                        "-map","0:v:0","-map","0:a:0?","-c:v","libx264","-preset","veryfast",
+                        "-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","192k",
+                        "-movflags","+faststart",str(final)],capture_output=True,text=True)
+                    if p.returncode!=0:
+                        raise RuntimeError("Ошибка объединения MP4: "+p.stderr[-800:])
+                _verified_video(final)
+                return FileResponse(final,media_type="video/mp4",filename=f"{title}.mp4",
+                    headers={"Cache-Control":"no-store"},
+                    background=BackgroundTask(lambda: (shutil.rmtree(jobdir,ignore_errors=True),STREAM_SEM.release())))
+            except Exception:
+                shutil.rmtree(jobdir,ignore_errors=True)
+                raise
 
         def body():
             try:
