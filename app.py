@@ -379,7 +379,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                 except ValueError:
                     cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
             cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mp4",
-                      "--postprocessor-args","Merger+ffmpeg_o:-movflags +frag_keyframe+empty_moov"]
+                      "--postprocessor-args","Merger+ffmpeg_o:-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +frag_keyframe+empty_moov"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
 
