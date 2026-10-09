@@ -306,8 +306,8 @@ def direct_download_head(url:str=Query(...),mode:str=Query("best")):
     u=valid(url)
     if mode not in ("best","audio") and not mode.startswith("video:"):
         raise HTTPException(400,"Некорректный режим")
-    ext="mp3" if mode=="audio" else "mkv"
-    media="audio/mpeg" if mode=="audio" else "video/x-matroska"
+    ext="mp3" if mode=="audio" else "mp4"
+    media="audio/mpeg" if mode=="audio" else "video/mp4"
     return StreamingResponse(iter(()),media_type=media,headers={"Cache-Control":"no-store","X-Accel-Buffering":"no"})
 
 @app.get("/api/download")
@@ -330,7 +330,7 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             ext="mp3"; media="audio/mpeg"
         else:
             selected=[v]+([a] if a else [])
-            ext="mkv"; media="video/x-matroska"
+            ext="mp4"; media="video/mp4"
 
         ascii_title="".join(c if ord(c)<128 and c not in '"\\' else "_" for c in title).strip(" ._") or "video"
         unicode_name=quote(f"{title}.{ext}",safe="")
@@ -355,8 +355,8 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
             producer=ff
             helpers=[ytdlp]
         else:
-            # Ask yt-dlp to merge video+audio itself and stream the final Matroska
-            # file to stdout. This preserves yt-dlp's native timestamp handling.
+            # Ask yt-dlp to merge video+audio into a fragmented MP4 stream.
+            # Fragmented MP4 supports non-seekable stdout without temporary files.
             if a:
                 fmt=f'{v["format_id"]}+{a["format_id"]}'
             else:
@@ -378,7 +378,8 @@ def direct_download(url:str=Query(...),mode:str=Query("best")):
                         cmd[pi+1]="http://127.0.0.1:1081"
                 except ValueError:
                     cmd[1:1]=["--proxy","http://127.0.0.1:1081"]
-            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mkv"]
+            cmd[1:1]=["--downloader","ffmpeg","--merge-output-format","mp4",
+                      "--postprocessor-args","Merger+ffmpeg_o:-movflags +frag_keyframe+empty_moov"]
             producer=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
             helpers=[]
 
