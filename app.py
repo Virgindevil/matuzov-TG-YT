@@ -229,10 +229,14 @@ def direct_formats(info, source):
             fmt.get("ext") != "mp4"
             or fmt.get("protocol") != "https"
             or fmt.get("has_drm")
-            or fmt.get("vcodec") in (None, "none")
-            or fmt.get("acodec") in (None, "none")
+            or fmt.get("vcodec") == "none"
+            or fmt.get("acodec") == "none"
         ):
             continue
+        if fmt.get("vcodec") is None or fmt.get("acodec") is None:
+            # X's progressive video variants omit codec metadata.
+            if source != "X" or not re.fullmatch(r"http(?:-\d+)?", fmt.get("format_id") or ""):
+                continue
         link = fmt.get("url") or ""
         try:
             parsed = urlsplit(link)
