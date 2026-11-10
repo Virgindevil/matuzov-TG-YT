@@ -54,7 +54,12 @@ def parse_vless_uri(uri):
     if stream=="ws":
         ss["wsSettings"]={"path":unquote(q.get("path","/")),"headers":{"Host":q.get("host",q.get("sni",p.hostname))}}
     elif stream=="grpc":
-        ss["grpcSettings"]={"serviceName":unquote(q.get("serviceName",""))}
+        ss["grpcSettings"] = {
+            "serviceName": q.get("serviceName", ""),
+            "multiMode": q.get("mode") == "multi",
+        }
+        if q.get("authority"):
+            ss["grpcSettings"]["authority"] = q["authority"]
     elif stream=="tcp" and q.get("headerType")=="http":
         ss["tcpSettings"]={"header":{"type":"http","request":{"path":[unquote(q.get("path","/"))],"headers":{"Host":[q.get("host",p.hostname)]}}}}
     return {
