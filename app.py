@@ -237,22 +237,13 @@ def network_test():
         result.update(ok=False, error="Проверка соединения через Xray не завершилась")
     return result
 
-def direct_formats(info, source):
-    domain = "googlevideo.com" if source == "YouTube" else "video.twimg.com"
-    by_height = {}
+def cdn_formats(info, domain):
     for fmt in info.get("formats") or []:
         if (
-            fmt.get("ext") != "mp4"
-            or fmt.get("protocol") != "https"
+            fmt.get("protocol") != "https"
             or fmt.get("has_drm")
-            or fmt.get("vcodec") == "none"
-            or fmt.get("acodec") == "none"
         ):
             continue
-        if fmt.get("vcodec") is None or fmt.get("acodec") is None:
-            # X's progressive video variants omit codec metadata.
-            if source != "X" or not re.fullmatch(r"http(?:-\d+)?", fmt.get("format_id") or ""):
-                continue
         link = fmt.get("url") or ""
         try:
             parsed = urlsplit(link)
@@ -263,14 +254,49 @@ def direct_formats(info, source):
             continue
         if host != domain and not host.endswith("." + domain):
             continue
+        yield fmt
+
+def direct_formats(info, source):
+    domain = "googlevideo.com" if source == "YouTube" else "video.twimg.com"
+    by_height = {}
+    for fmt in cdn_formats(info, domain):
+        if fmt.get("ext") != "mp4" or "none" in (fmt.get("vcodec"), fmt.get("acodec")):
+            continue
+        if None in (fmt.get("vcodec"), fmt.get("acodec")):
+            # X's progressive video variants omit codec metadata.
+            if source != "X" or not re.fullmatch(r"http(?:-\d+)?", fmt.get("format_id") or ""):
+                continue
         height = fmt.get("height") or 0
         if height not in by_height or (fmt.get("tbr") or 0) > by_height[height][0]:
             by_height[height] = (fmt.get("tbr") or 0, {
                 "mode": f"video:{height}",
                 "label": f"{height}p" if height else "MP4",
-                "url": link,
+                "url": fmt["url"],
             })
     return [by_height[h][1] for h in sorted(by_height, reverse=True)]
+
+def youtube_track_pairs(info, qualities):
+    audio = None
+    videos = {}
+    progressive = {quality["mode"] for quality in qualities}
+    for fmt in cdn_formats(info, "googlevideo.com"):
+        video_codec = fmt.get("vcodec") or ""
+        audio_codec = fmt.get("acodec") or ""
+        if fmt.get("ext") in ("m4a", "mp4") and video_codec == "none" and audio_codec.startswith("mp4a"):
+            if audio is None or (fmt.get("abr") or 0) > (audio.get("abr") or 0):
+                audio = fmt
+        height = fmt.get("height")
+        if (fmt.get("ext") == "mp4" and height and audio_codec == "none"
+                and video_codec.startswith(("avc1", "av01", "vp09")) and f"video:{height}" not in progressive):
+            rank = (video_codec.startswith("avc1"), fmt.get("fps") or 0, fmt.get("tbr") or 0)
+            if height not in videos or rank > videos[height][0]:
+                videos[height] = (rank, fmt["url"])
+    if audio is None:
+        return []
+    return [
+        {"label": f"{height}p", "video_url": videos[height][1], "audio_url": audio["url"]}
+        for height in sorted(videos, reverse=True)
+    ]
 
 def analyze_video(raw_url):
     url, source = video_url(raw_url)
@@ -295,12 +321,14 @@ def analyze_video(raw_url):
     if not info or info.get("_type") in ("playlist", "multi_video"):
         raise HTTPException(422, "Нужна ссылка на один ролик.")
     qualities = direct_formats(info, source)
-    if not qualities:
-        raise HTTPException(422, "У источника нет прямого MP4 со звуком. Для этого ролика используйте Windows-приложение.")
+    track_pairs = youtube_track_pairs(info, qualities) if source == "YouTube" else []
+    if not qualities and not track_pairs:
+        raise HTTPException(422, "У источника нет подходящих прямых ссылок. Для этого ролика используйте Windows-приложение.")
     return {
         "title": info.get("title") or "Видео",
         "source": source,
         "qualities": qualities,
+        "track_pairs": track_pairs,
     }
 
 @app.post("/api/analyze")
@@ -312,7 +340,7 @@ def direct_download(url: str, mode: str = "best"):
     if mode != "best" and not re.fullmatch(r"video:[0-9]{1,5}", mode):
         raise HTTPException(400, "Доступно только прямое скачивание MP4 со звуком.")
     qualities = analyze_video(url)["qualities"]
-    selected = qualities[0] if mode == "best" else next(
+    selected = (qualities[0] if qualities else None) if mode == "best" else next(
         (quality for quality in qualities if quality["mode"] == mode), None
     )
     if selected is None:

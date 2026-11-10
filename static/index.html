@@ -23,10 +23,22 @@
                 <h2 id="title"></h2>
                 <div id="qualities"></div>
                 <p>Если MP4 открылся в новой вкладке, сохраните его через меню плеера или браузера.</p>
+                <section id="merge-panel" class="hidden" aria-label="Сборка MP4">
+                    <p id="merge-status" role="status"></p>
+                    <a id="save-mp4" class="download hidden">Сохранить MP4</a>
+                    <div id="merge-manual" class="hidden">
+                        <p>Сохраните обе дорожки, затем выберите их ниже. Сборка выполняется на вашем устройстве.</p>
+                        <a id="video-track" target="_blank" rel="noopener noreferrer">Видеодорожка</a>
+                        <a id="audio-track" target="_blank" rel="noopener noreferrer">Аудиодорожка</a>
+                        <p><label>Видео MP4 <input id="video-file" type="file" accept=".mp4,video/mp4"></label></p>
+                        <p><label>Аудио M4A <input id="audio-file" type="file" accept=".m4a,.mp4,audio/mp4"></label></p>
+                        <button id="merge-files" class="download" type="button">Объединить файлы</button>
+                    </div>
+                </section>
             </div>
         </section>
-        <footer>Файлы загружаются с CDN источника. Для более высоких разрешений с отдельными дорожками используйте Windows-приложение.</footer>
+        <footer>Дорожки загружаются с CDN источника. Браузер объединяет их в MP4 на вашем устройстве. Лимит для сборки — 200 МБ на обе дорожки.</footer>
     </main>
-    <script src="/app.js?v=direct"></script>
+    <script type="module" src="/app.js?v=hd"></script>
 </body>
 </html>
