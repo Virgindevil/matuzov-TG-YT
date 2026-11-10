@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Video Downloader — HD",
+  "version": "1.0.0",
+  "description": "Сохраняет один MP4 со звуком напрямую с CDN YouTube.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://*.googlevideo.com/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["https://matuzov-tg-yt.onrender.com/*"],
+    "js": ["bridge.js"],
+    "run_at": "document_idle"
+  }]
+}

@@ -21,19 +21,21 @@ export async function fetchTrack(url, maxBytes) {
     }
 }
 
-export async function mergeTracks(videoFile, audioFile) {
-    if (videoFile.size + audioFile.size > MAX_INPUT_BYTES) {
+export async function mergeTracks(videoFile, audioFile, {writable, onWrite} = {}) {
+    if (!writable && videoFile.size + audioFile.size > MAX_INPUT_BYTES) {
         throw new Error("Дорожки превышают лимит 200 МБ. Выберите меньшее разрешение.");
     }
     const {
         Input, MP4, BlobSource, EncodedPacketSink, EncodedVideoPacketSource,
-        EncodedAudioPacketSource, Output, Mp4OutputFormat, BufferTarget,
+        EncodedAudioPacketSource, Output, Mp4OutputFormat, BufferTarget, StreamTarget, UrlSource,
     } = await import("https://cdn.jsdelivr.net/npm/mediabunny@1.65.2/+esm");
 
-    const videoInput = new Input({formats: [MP4], source: new BlobSource(videoFile)});
-    const audioInput = new Input({formats: [MP4], source: new BlobSource(audioFile)});
-    const target = new BufferTarget();
-    const output = new Output({format: new Mp4OutputFormat(), target});
+    const videoInput = openInput(videoFile);
+    const audioInput = openInput(audioFile);
+    const target = writable ? new StreamTarget(writable) : new BufferTarget();
+    if (onWrite) target.onwrite = onWrite;
+    const format = writable ? new Mp4OutputFormat({fastStart: false}) : new Mp4OutputFormat();
+    const output = new Output({format, target});
     try {
         const video = await videoInput.getPrimaryVideoTrack();
         const audio = await audioInput.getPrimaryAudioTrack();
@@ -48,13 +50,24 @@ export async function mergeTracks(videoFile, audioFile) {
         await output.start();
         await Promise.all([copyTrack(video, videoSource), copyTrack(audio, audioSource)]);
         await output.finalize();
-        return new Blob([target.buffer], {type: "video/mp4"});
+        if (!writable) return new Blob([target.buffer], {type: "video/mp4"});
     } catch (error) {
         await output.cancel();
         throw error;
     } finally {
         videoInput.dispose();
         audioInput.dispose();
+    }
+
+    function openInput(input) {
+        const source = typeof input === "string"
+            ? new UrlSource(input, {
+                requestInit: {credentials: "omit", referrerPolicy: "no-referrer"},
+                maxCacheSize: 16 * 1024 * 1024,
+                getRetryDelay: (attempt, error) => attempt < 1 && !(error instanceof TypeError) ? 1 : null,
+            })
+            : new BlobSource(input);
+        return new Input({formats: [MP4], source});
     }
 
     async function copyTrack(track, source) {

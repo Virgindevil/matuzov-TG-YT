@@ -1,4 +1,4 @@
-import {fetchTrack, MAX_INPUT_BYTES, mergeTracks} from "./merge.js";
+import {fetchTrack, MAX_INPUT_BYTES, mergeTracks} from "./merge.js?v=stream";
 
 const url = document.querySelector("#url");
 const find = document.querySelector("#find");
@@ -38,6 +38,49 @@ async function assemble(video, audio) {
     mergeStatus.textContent = "MP4 готов.";
 }
 
+async function saveTracksToDisk(video, audio) {
+    const handle = await window.showSaveFilePicker({
+        suggestedName: outputName,
+        types: [{description: "Видео MP4", accept: {"video/mp4": [".mp4"]}}],
+    });
+    const writable = await handle.createWritable();
+    let writtenMiB = 0;
+    mergeStatus.textContent = "Читаем дорожки и записываем MP4…";
+    try {
+        await mergeTracks(video, audio, {
+            writable,
+            onWrite: (_start, end) => {
+                const size = Math.floor(end / (1024 * 1024));
+                if (size <= writtenMiB) return;
+                writtenMiB = size;
+                mergeStatus.textContent = "Записано " + size + " МБ…";
+            },
+        });
+    } catch (error) {
+        await writable.abort().catch(() => {});
+        throw error;
+    }
+    mergeStatus.textContent = "MP4 со звуком сохранён.";
+}
+
+function openChromeDownload(pair) {
+    return new Promise((resolve) => {
+        const event = "video-downloader-hd-result";
+        function onResult(result) {
+            clearTimeout(timeout);
+            resolve(result.detail === true);
+        }
+        const timeout = setTimeout(() => {
+            document.removeEventListener(event, onResult);
+            resolve(false);
+        }, 5000);
+        document.addEventListener(event, onResult, {once: true});
+        document.dispatchEvent(new CustomEvent("video-downloader-hd-save", {
+            detail: JSON.stringify({video: pair.video_url, audio: pair.audio_url, name: outputName}),
+        }));
+    });
+}
+
 async function downloadAndMerge(pair, title) {
     clearOutput();
     mergePanel.classList.remove("hidden");
@@ -50,12 +93,25 @@ async function downloadAndMerge(pair, title) {
         + " - " + pair.label + ".mp4";
     setMerging(true);
     try {
+        if (document.documentElement.dataset.videoDownloaderHd === "1") {
+            if (!await openChromeDownload(pair)) throw new Error("Расширение не ответило.");
+            mergeStatus.textContent = "Выберите место сохранения в открывшейся вкладке.";
+            return;
+        }
+        if (typeof window.showSaveFilePicker === "function") {
+            await saveTracksToDisk(pair.video_url, pair.audio_url);
+            return;
+        }
         mergeStatus.textContent = "Загружаем дорожки напрямую с CDN…";
         const video = await fetchTrack(pair.video_url, MAX_INPUT_BYTES);
         const audio = await fetchTrack(pair.audio_url, MAX_INPUT_BYTES - video.size);
         await assemble(video, audio);
-    } catch {
-        mergeStatus.textContent = "Автоматическая сборка не удалась. Можно сохранить дорожки отдельно. Если ссылки устарели, найдите видео снова.";
+    } catch (error) {
+        if (error.name === "AbortError") {
+            mergeStatus.textContent = "Сохранение отменено.";
+            return;
+        }
+        mergeStatus.textContent = "Если CDN не разрешает странице скачать дорожки, используйте расширение Video Downloader — HD. Если ссылки устарели, найдите видео снова.";
         manual.classList.remove("hidden");
     } finally {
         setMerging(false);
@@ -70,9 +126,15 @@ mergeFiles.addEventListener("click", async () => {
     clearOutput();
     setMerging(true);
     try {
-        await assemble(videoFile.files[0], audioFile.files[0]);
-    } catch {
-        mergeStatus.textContent = "Не удалось собрать MP4. Проверьте формат файлов и лимит 200 МБ.";
+        if (typeof window.showSaveFilePicker === "function") {
+            await saveTracksToDisk(videoFile.files[0], audioFile.files[0]);
+        } else {
+            await assemble(videoFile.files[0], audioFile.files[0]);
+        }
+    } catch (error) {
+        mergeStatus.textContent = error.name === "AbortError"
+            ? "Сохранение отменено."
+            : "Не удалось собрать MP4. Проверьте формат файлов и доступное место.";
     } finally {
         setMerging(false);
     }
@@ -116,7 +178,7 @@ document.querySelector("#search").addEventListener("submit", async (event) => {
             const button = document.createElement("button");
             button.type = "button";
             button.className = "download";
-            button.textContent = pair.label + " · Собрать MP4";
+            button.textContent = pair.label + " · Скачать со звуком";
             button.addEventListener("click", () => downloadAndMerge(pair, data.title));
             qualities.append(button);
         }
