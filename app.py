@@ -1,4 +1,5 @@
 import os,time,threading,traceback,subprocess,json,re,tempfile
+import shutil
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from fastapi import FastAPI, HTTPException
