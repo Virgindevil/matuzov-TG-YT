@@ -15,6 +15,16 @@ const mergeFiles = document.querySelector("#merge-files");
 let outputUrl;
 let outputName;
 
+function addDirectLink(href, label) {
+    const link = document.createElement("a");
+    link.className = "download";
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = label;
+    qualities.append(link);
+}
+
 function clearOutput() {
     if (outputUrl) URL.revokeObjectURL(outputUrl);
     outputUrl = undefined;
@@ -166,15 +176,10 @@ document.querySelector("#search").addEventListener("submit", async (event) => {
         document.querySelector("#title").textContent = data.title;
         document.querySelector("#source").textContent = data.source;
         for (const quality of data.qualities) {
-            const link = document.createElement("a");
-            link.className = "download";
-            link.href = quality.url;
-            link.target = "_blank";
-            link.rel = "noopener noreferrer";
-            link.textContent = quality.label + " · MP4";
-            qualities.append(link);
+            addDirectLink(quality.url, quality.label + " · MP4");
         }
         for (const pair of data.track_pairs ?? []) {
+            addDirectLink(pair.video_url, pair.label + " · Напрямую (без звука)");
             const button = document.createElement("button");
             button.type = "button";
             button.className = "download";
