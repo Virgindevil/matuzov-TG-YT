@@ -277,8 +277,17 @@ def analyze_video(raw_url):
     if not ANALYSIS_SLOTS.acquire(blocking=False):
         raise HTTPException(429, "Сервис занят. Повторите запрос через несколько секунд.")
     try:
-        with yt_dlp.YoutubeDL(opts(source)) as ydl:
-            info = ydl.extract_info(url, download=False)
+        options = opts(source)
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except yt_dlp.utils.DownloadError:
+            if source != "YouTube" or options.get("proxy") != "socks5://127.0.0.1:1080" or os.getenv("YOUTUBE_PROXY", "").strip():
+                raise
+            direct_options = options | {"proxy": ""}
+            direct_options.pop("cookiefile", None)
+            with yt_dlp.YoutubeDL(direct_options) as ydl:
+                info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError:
         raise HTTPException(422, "Источник не отдал информацию о видео. Проверьте, что ролик доступен публично.")
     finally:
