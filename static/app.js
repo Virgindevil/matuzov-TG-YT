@@ -179,7 +179,6 @@ document.querySelector("#search").addEventListener("submit", async (event) => {
             addDirectLink(quality.url, quality.label + " · MP4");
         }
         for (const pair of data.track_pairs ?? []) {
-            addDirectLink(pair.video_url, pair.label + " · Напрямую (без звука)");
             const button = document.createElement("button");
             button.type = "button";
             button.className = "download";
