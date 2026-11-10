@@ -1,2 +1,46 @@
-const $=s=>document.querySelector(s),url=$("#url"),find=$("#find"),msg=$("#msg"),card=$("#card"),qs=$("#qualities"),prog=$("#progress");async function api(p,o){let r=await fetch(p,o),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.detail||"Ошибка сервера");return j}find.onclick=async()=>{let u=url.value.trim();if(!u)return;msg.textContent="";find.disabled=true;find.textContent="Ищем…";try{let d=await api("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u})});$("#title").textContent=d.title;$("#source").textContent=d.source;$("#thumb").src=d.thumbnail||"";qs.innerHTML="";d.qualities.forEach(q=>{let b=document.createElement("button");let size=q.size?formatBytes(q.size):"";b.textContent=size?`${q.label} · ~${size}`:q.label;b.title=q.size?"Примерный размер. Итоговый файл может отличаться.":"";b.onclick=()=>start(u,q.mode);qs.appendChild(b)});card.classList.remove("hidden")}catch(e){msg.textContent=e.message}finally{find.disabled=false;find.textContent="Найти"}};function start(u,m){msg.textContent="";window.location.href="/api/download?url="+encodeURIComponent(u)+"&mode="+encodeURIComponent(m)}url.onkeydown=e=>{if(e.key==="Enter")find.click()}
-function formatBytes(n){if(!n||n<=0)return "";let u=["Б","КБ","МБ","ГБ","ТБ"],i=Math.min(Math.floor(Math.log(n)/Math.log(1024)),u.length-1),v=n/Math.pow(1024,i);return `${v>=100||i===0?v.toFixed(0):v.toFixed(1)} ${u[i]}`}
+const url = document.querySelector("#url");
+const find = document.querySelector("#find");
+const message = document.querySelector("#msg");
+const card = document.querySelector("#card");
+const qualities = document.querySelector("#qualities");
+
+document.querySelector("#search").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = url.value.trim();
+    if (!input || find.disabled) return;
+
+    message.textContent = "";
+    card.classList.add("hidden");
+    qualities.replaceChildren();
+    find.disabled = true;
+    find.textContent = "Ищем…";
+    try {
+        const response = await fetch("/api/analyze", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({url: input}),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(typeof data.detail === "string" ? data.detail : "Не удалось найти видео.");
+        }
+
+        document.querySelector("#title").textContent = data.title;
+        document.querySelector("#source").textContent = data.source;
+        for (const quality of data.qualities) {
+            const link = document.createElement("a");
+            link.className = "download";
+            link.href = quality.url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = quality.label + " · MP4";
+            qualities.append(link);
+        }
+        card.classList.remove("hidden");
+    } catch (error) {
+        message.textContent = error.message;
+    } finally {
+        find.disabled = false;
+        find.textContent = "Найти";
+    }
+});

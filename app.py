@@ -1,15 +1,14 @@
-import os,time,uuid,shutil,threading,traceback,subprocess,json
+import os,time,threading,traceback,subprocess,json,re,tempfile
 from pathlib import Path
-from urllib.parse import urlparse,quote
-from fastapi import FastAPI,HTTPException,Query
-from fastapi.responses import StreamingResponse,FileResponse
-from starlette.background import BackgroundTask
+from urllib.parse import parse_qs, urlsplit
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
 
 BASE=Path(__file__).resolve().parent
-TMP=Path("/tmp/video_downloader"); TMP.mkdir(parents=True,exist_ok=True)
+TMP=(Path(tempfile.gettempdir()) / "video_downloader"); TMP.mkdir(parents=True,exist_ok=True)
 SECRET_YT_COOKIES=Path("/etc/secrets/youtube.txt")
 WORK_YT_COOKIES=TMP/"youtube.txt"
 SECRET_TW_COOKIES=Path("/etc/secrets/twitter.txt")
@@ -23,7 +22,7 @@ COOKIE_READY=False
 TW_COOKIE_READY=False
 
 def parse_vless_uri(uri):
-    from urllib.parse import urlsplit, parse_qs, unquote
+    from urllib.parse import parse_qs, urlsplit, parse_qs, unquote
     p=urlsplit(uri.strip())
     if p.scheme.lower()!="vless" or not p.username or not p.hostname or not p.port:
         raise ValueError("Некорректный VLESS URL")
@@ -126,102 +125,76 @@ def sync_twitter_cookies(force=False):
             traceback.print_exc()
             return None
 
-STREAM_SEM=threading.BoundedSemaphore(int(os.getenv("MAX_STREAMS","1")))
-app=FastAPI(title="Video Downloader v5")
+app = FastAPI(title="Video Downloader v5.1")
+ANALYSIS_SLOTS = threading.BoundedSemaphore(2)
+NO_STORE = {"Cache-Control": "no-store"}
 
-class URLIn(BaseModel): url:str
-class DownloadIn(BaseModel): url:str; mode:str="best"
+# Only accept individual video pages on the two supported services.
+YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
+STATUS_PATH = re.compile(r"/(?:[A-Za-z0-9_]+/status|i/web/status)/(\d+)(/(?:video|photo)/\d+)?/?")
 
-def valid(u):
-    u=u.strip(); p=urlparse(u)
-    if p.scheme not in ("http","https") or not p.netloc: raise HTTPException(400,"Некорректный URL")
-    return u
-def opts(url=""):
+class URLIn(BaseModel):
+    url: str
+
+def video_url(raw):
+    from urllib.parse import parse_qs
+
+    if len(raw) > 2048:
+        raise HTTPException(400, "Ссылка слишком длинная.")
+    try:
+        parsed = urlsplit(raw.strip())
+        host = parsed.hostname
+        if (
+            parsed.scheme in ("http", "https")
+            and parsed.netloc.lower() == host
+        ):
+            parts = parsed.path.strip("/").split("/")
+            video_id = ""
+            if host == "youtu.be" and len(parts) == 1:
+                video_id = parts[0]
+            elif host in ("youtube.com", "www.youtube.com", "m.youtube.com") and parsed.path == "/watch":
+                video_id = parse_qs(parsed.query).get("v", [""])[0]
+            elif host in ("youtube.com", "www.youtube.com", "m.youtube.com", "www.youtube-nocookie.com"):
+                if len(parts) == 2 and parts[0] in ("shorts", "live", "embed", "v"):
+                    video_id = parts[1]
+            if YOUTUBE_ID.fullmatch(video_id):
+                return f"https://www.youtube.com/watch?v={video_id}", "YouTube"
+            if host in ("x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"):
+                match = STATUS_PATH.fullmatch(parsed.path)
+                if match:
+                    return f"https://x.com/i/web/status/{match[1]}{match[2] or ''}", "X"
+    except ValueError:
+        pass
+    raise HTTPException(400, "Вставьте ссылку на ролик YouTube или запись Twitter/X.")
+
+def opts(source):
     options = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 20,
-        "retries": 3,
-        "fragment_retries": 3,
+        "skip_download": True,
+        "socket_timeout": 15,
+        "extractor_retries": 1,
+        "js_runtimes": {"node": {}},
     }
-
-    if "youtube.com" in url or "youtu.be" in url:
+    if source == "YouTube":
+        options["allowed_extractors"] = ["youtube"]
         cookies = sync_youtube_cookies()
-        if cookies is not None and cookies.is_file():
-            options["cookiefile"] = str(cookies)
-
         proxy = os.getenv("YOUTUBE_PROXY", "").strip()
         if proxy:
             options["proxy"] = proxy
         elif xray_ready():
             options["proxy"] = "socks5://127.0.0.1:1080"
-
-    elif "x.com" in url or "twitter.com" in url:
+    else:
+        options["allowed_extractors"] = ["twitter"]
         cookies = sync_twitter_cookies()
-        if cookies is not None and cookies.is_file():
-            options["cookiefile"] = str(cookies)
-
+    if cookies is not None and cookies.is_file():
+        options["cookiefile"] = str(cookies)
     return options
+
 @app.get("/api/health")
 def health():
-    work = sync_youtube_cookies()
-    tw_work = sync_twitter_cookies()
-    return {
-        "ok": True,
-        "youtube_secret_file": SECRET_YT_COOKIES.is_file(),
-        "youtube_cookies": work is not None and work.is_file(),
-        "youtube_cookies_writable": work is not None and os.access(work, os.W_OK),
-        "youtube_cookies_size": work.stat().st_size if work is not None and work.is_file() else 0,
-        "youtube_proxy_configured": bool(os.getenv("YOUTUBE_PROXY", "").strip()),
-        "twitter_secret_file": SECRET_TW_COOKIES.is_file(),
-        "twitter_cookies": tw_work is not None and tw_work.is_file(),
-        "twitter_cookies_writable": tw_work is not None and os.access(tw_work, os.W_OK),
-        "twitter_cookies_size": tw_work.stat().st_size if tw_work is not None and tw_work.is_file() else 0,
-        "vless_secret_file": SECRET_VLESS.is_file(),
-        "xray_running": xray_ready(),
-        "xray_error": XRAY_ERROR,
-    }
-
-
-def _fmt_size(f,duration=0):
-    size=f.get("filesize") or f.get("filesize_approx")
-    if size: return int(size)
-    tbr=f.get("tbr")
-    return int(float(tbr)*1000/8*duration) if tbr and duration else 0
-
-def _pick_streams(info,mode):
-    fs=info.get("formats") or []
-    duration=float(info.get("duration") or 0)
-    if mode=="audio":
-        aud=[f for f in fs if f.get("url") and f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
-        a=max(aud,key=lambda f:(f.get("abr") or f.get("tbr") or 0),default=None)
-        if not a: raise RuntimeError("Аудиопоток не найден")
-        return None,a,_fmt_size(a,duration)
-    if mode.startswith("video:"):
-        h=int(mode.split(":",1)[1])
-    else:
-        h=max([int(f.get("height") or 0) for f in fs if f.get("vcodec") not in (None,"none")],default=0)
-    vids=[f for f in fs if f.get("url") and f.get("vcodec") not in (None,"none") and int(f.get("height") or 0)<=h]
-    if not vids: raise RuntimeError("Видеопоток не найден")
-    # Prefer direct HTTP/DASH over HLS at the same resolution. Some YouTube HLS
-    # variants (e.g. itag 312) expose initial packets without timestamps; ffmpeg
-    # then cannot mux them to a non-seekable Matroska stdout stream.
-    def video_rank(f):
-        proto=str(f.get("protocol") or "").lower()
-        is_hls = "m3u8" in proto or str(f.get("url") or "").lower().endswith(".m3u8")
-        return (int(f.get("height") or 0), 0 if is_hls else 1, f.get("tbr") or 0)
-    v=max(vids,key=video_rank)
-    if v.get("acodec") not in (None,"none"):
-        return v,None,_fmt_size(v,duration)
-    aud=[f for f in fs if f.get("url") and f.get("acodec") not in (None,"none") and f.get("vcodec")=="none"]
-    a=max(aud,key=lambda f:(f.get("abr") or f.get("tbr") or 0),default=None)
-    return v,a,_fmt_size(v,duration)+(_fmt_size(a,duration) if a else 0)
-
-def _safe_name(name):
-    bad='<>:"/\\|?*'
-    s="".join("_" if c in bad else c for c in (name or "video"))
-    return s.strip(" .")[:150] or "video"
+    return {"ok": True, "delivery": "direct"}
 
 @app.get("/api/network-test")
 def network_test():
@@ -248,189 +221,74 @@ def network_test():
         result["error"]=str(e)
     return result
 
-@app.post("/api/analyze")
-def analyze(d:URLIn):
-    u=valid(d.url)
+def direct_formats(info, source):
+    domain = "googlevideo.com" if source == "YouTube" else "video.twimg.com"
+    by_height = {}
+    for fmt in info.get("formats") or []:
+        if (
+            fmt.get("ext") != "mp4"
+            or fmt.get("protocol") != "https"
+            or fmt.get("has_drm")
+            or fmt.get("vcodec") in (None, "none")
+            or fmt.get("acodec") in (None, "none")
+        ):
+            continue
+        link = fmt.get("url") or ""
+        try:
+            parsed = urlsplit(link)
+            host = parsed.hostname or ""
+            if parsed.scheme != "https" or parsed.netloc.lower() != host:
+                continue
+        except ValueError:
+            continue
+        if host != domain and not host.endswith("." + domain):
+            continue
+        height = fmt.get("height") or 0
+        if height not in by_height or (fmt.get("tbr") or 0) > by_height[height][0]:
+            by_height[height] = (fmt.get("tbr") or 0, {
+                "mode": f"video:{height}",
+                "label": f"{height}p" if height else "MP4",
+                "url": link,
+            })
+    return [by_height[h][1] for h in sorted(by_height, reverse=True)]
+
+def analyze_video(raw_url):
+    url, source = video_url(raw_url)
+    if not ANALYSIS_SLOTS.acquire(blocking=False):
+        raise HTTPException(429, "Сервис занят. Повторите запрос через несколько секунд.")
     try:
-        with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True,"format":None}) as y: i=y.extract_info(u,download=False)
-        fs=i.get("formats") or []
-        hs=sorted({int(f["height"]) for f in fs if f.get("height") and f.get("vcodec") not in (None,"none")})
-        chosen=[]
-        for h in hs:
-            if not chosen or abs(h-chosen[-1])>8: chosen.append(h)
-            elif h>chosen[-1]: chosen[-1]=h
-        if len(chosen)>8:
-            ids={round(x*(len(chosen)-1)/7) for x in range(8)}; chosen=[chosen[x] for x in sorted(ids)]
-        q=[]
-        for h in chosen:
-            try:
-                _,_,size=_pick_streams(i,f"video:{h}")
-            except Exception:
-                size=0
-            q.append({"mode":f"video:{h}","label":"4K" if 2100<=h<=2200 else ("8K" if h>=4320 else f"{h}p"),"size":size or None})
-        try:
-            _,_,audio_size=_pick_streams(i,"audio")
-            q.append({"mode":"audio","label":"MP3","size":audio_size or None})
-        except Exception:
-            pass
-        try:
-            _,_,best_size=_pick_streams(i,"best")
-        except Exception:
-            best_size=0
-        q.append({"mode":"best","label":"Лучшее","size":best_size or None})
-        return {"title":i.get("title") or "Видео","thumbnail":i.get("thumbnail"),"source":i.get("extractor_key") or i.get("extractor") or urlparse(u).hostname,"qualities":q}
-    except Exception as e: raise HTTPException(400,str(e))
+        with yt_dlp.YoutubeDL(opts(source)) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError:
+        raise HTTPException(422, "Источник не отдал информацию о видео. Проверьте, что ролик доступен публично.")
+    finally:
+        ANALYSIS_SLOTS.release()
+    if not info or info.get("_type") in ("playlist", "multi_video"):
+        raise HTTPException(422, "Нужна ссылка на один ролик.")
+    qualities = direct_formats(info, source)
+    if not qualities:
+        raise HTTPException(422, "У источника нет прямого MP4 со звуком. Для этого ролика используйте Windows-приложение.")
+    return {
+        "title": info.get("title") or "Видео",
+        "source": source,
+        "qualities": qualities,
+    }
 
-def _ytdlp_pipe_cmd(u,format_id):
-    cmd=["yt-dlp","--quiet","--no-warnings","--no-playlist",
-         "--retries","10","--fragment-retries","10","--concurrent-fragments","1",
-         "--retry-sleep","fragment:1:5","--socket-timeout","30",
-         "-f",str(format_id)]
-    cmd+=["-o","-",u]
-    if "youtube.com" in u or "youtu.be" in u:
-        cookies=sync_youtube_cookies()
-        if cookies is not None and cookies.is_file():
-            cmd[1:1]=["--cookies",str(cookies)]
-        proxy=os.getenv("YOUTUBE_PROXY","").strip()
-        if proxy:
-            cmd[1:1]=["--proxy",proxy]
-        elif xray_ready():
-            cmd[1:1]=["--proxy","socks5://127.0.0.1:1080"]
-    elif "x.com" in u or "twitter.com" in u:
-        cookies=sync_twitter_cookies()
-        if cookies is not None and cookies.is_file():
-            cmd[1:1]=["--cookies",str(cookies)]
-    return cmd
-
-def _verified_video(path):
-    p=subprocess.run(["ffprobe","-v","error","-select_streams","v:0",
-        "-show_entries","stream=codec_type,width,height","-of","json",str(path)],
-        capture_output=True,text=True,timeout=60)
-    if p.returncode!=0:
-        raise RuntimeError("FFprobe: "+p.stderr[-500:])
-    streams=json.loads(p.stdout).get("streams",[])
-    if not streams or not streams[0].get("width"):
-        raise RuntimeError("Итоговый файл не содержит видеопоток")
-
-@app.head("/api/download")
-def direct_download_head(url:str=Query(...),mode:str=Query("best")):
-    u=valid(url)
-    if mode not in ("best","audio") and not mode.startswith("video:"):
-        raise HTTPException(400,"Некорректный режим")
-    ext="mp3" if mode=="audio" else "mp4"
-    media="audio/mpeg" if mode=="audio" else "video/mp4"
-    return StreamingResponse(iter(()),media_type=media,headers={"Cache-Control":"no-store","X-Accel-Buffering":"no"})
+@app.post("/api/analyze")
+def analyze(data: URLIn):
+    return JSONResponse(analyze_video(data.url), headers=NO_STORE)
 
 @app.get("/api/download")
-def direct_download(url:str=Query(...),mode:str=Query("best")):
-    u=valid(url)
-    if mode not in ("best","audio") and not mode.startswith("video:"):
-        raise HTTPException(400,"Некорректный режим")
-    if not STREAM_SEM.acquire(blocking=False):
-        raise HTTPException(429,"Уже идёт другая загрузка. Дождитесь её завершения.")
-    slot_held=True
-    try:
-        # yt-dlp handles the remote YouTube/CDN connection and retries.
-        # FFmpeg only reads local OS pipes, so a googlevideo redirect cannot break FFmpeg.
-        with yt_dlp.YoutubeDL(opts(u)|{"skip_download":True}) as y:
-            info=y.extract_info(u,download=False)
-        v,a,_=_pick_streams(info,mode)
-        title=_safe_name(info.get("title"))
-        if mode=="audio":
-            selected=[a]
-            ext="mp3"; media="audio/mpeg"
-        else:
-            selected=[v]+([a] if a else [])
-            ext="mp4"; media="video/mp4"
-
-        ascii_title="".join(c if ord(c)<128 and c not in '"\\' else "_" for c in title).strip(" ._") or "video"
-        unicode_name=quote(f"{title}.{ext}",safe="")
-        headers={
-            "Content-Disposition":f'attachment; filename="{ascii_title}.{ext}"; filename*=UTF-8\'\'{unicode_name}',
-            "Cache-Control":"no-store",
-            "X-Accel-Buffering":"no"
-        }
-        # Let yt-dlp own format downloading and merging. Piping individual
-        # YouTube formats into our own ffmpeg loses timestamps for some formats.
-        if mode=="audio":
-            fmt=str(a["format_id"])
-            cmd=_ytdlp_pipe_cmd(u,fmt)
-            # yt-dlp writes the selected audio stream to stdout; transcode to MP3 here.
-            ytdlp=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=None,bufsize=0)
-            ff=subprocess.Popen(
-                ["ffmpeg","-hide_banner","-loglevel","warning","-i","pipe:0",
-                 "-vn","-c:a","libmp3lame","-q:a","0","-f","mp3","pipe:1"],
-                stdin=ytdlp.stdout,stdout=subprocess.PIPE,stderr=None,bufsize=0
-            )
-            ytdlp.stdout.close()
-            producer=ff
-            helpers=[ytdlp]
-        else:
-            # Download to a private temporary directory before sending HTTP headers.
-            # yt-dlp handles all media requests (and proxy/cookies) itself.
-            jobdir=TMP/("job_"+uuid.uuid4().hex)
-            jobdir.mkdir(parents=True,exist_ok=False)
-            try:
-                fmt=f'{v["format_id"]}+{a["format_id"]}' if a else str(v["format_id"])
-                settings=opts(u)|{
-                    "format":fmt,
-                    "outtmpl":str(jobdir/"video.%(ext)s"),
-                    "merge_output_format":"mp4",
-                    "noplaylist":True,
-                }
-                with yt_dlp.YoutubeDL(settings) as downloader:
-                    result=downloader.extract_info(u,download=True)
-                candidates=sorted(jobdir.glob("video.*"))
-                candidates=[p for p in candidates if p.suffix.lower() in (".mp4",".mkv",".webm")]
-                if len(candidates)!=1:
-                    raise RuntimeError("Не удалось определить итоговый видеофайл")
-                source=candidates[0]
-                final=jobdir/"final.mp4"
-                # Remux on disk. Transcode only when codecs cannot be copied into MP4.
-                copy_cmd=["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(source),
-                          "-map","0:v:0","-map","0:a:0?", "-c","copy","-movflags","+faststart",str(final)]
-                p=subprocess.run(copy_cmd,capture_output=True,text=True)
-                if p.returncode!=0:
-                    p=subprocess.run(["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(source),
-                        "-map","0:v:0","-map","0:a:0?","-c:v","libx264","-preset","veryfast",
-                        "-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","192k",
-                        "-movflags","+faststart",str(final)],capture_output=True,text=True)
-                    if p.returncode!=0:
-                        raise RuntimeError("Ошибка объединения MP4: "+p.stderr[-800:])
-                _verified_video(final)
-                return FileResponse(final,media_type="video/mp4",filename=f"{title}.mp4",
-                    headers={"Cache-Control":"no-store"},
-                    background=BackgroundTask(lambda: (shutil.rmtree(jobdir,ignore_errors=True),STREAM_SEM.release())))
-            except Exception:
-                shutil.rmtree(jobdir,ignore_errors=True)
-                raise
-
-        def body():
-            try:
-                while True:
-                    chunk=producer.stdout.read(1024*256)
-                    if not chunk: break
-                    yield chunk
-            finally:
-                if producer.poll() is None: producer.terminate()
-                for p in helpers:
-                    if p.poll() is None: p.terminate()
-                try: producer.wait(timeout=3)
-                except Exception: producer.kill()
-                for p in helpers:
-                    try: p.wait(timeout=2)
-                    except Exception:
-                        try: p.kill()
-                        except Exception: pass
-                try: STREAM_SEM.release()
-                except ValueError: pass
-        return StreamingResponse(body(),media_type=media,headers=headers)
-    except Exception as e:
-        if locals().get("slot_held",False):
-            try: STREAM_SEM.release()
-            except ValueError: pass
-        traceback.print_exc()
-        raise HTTPException(400,str(e))
+def direct_download(url: str, mode: str = "best"):
+    if mode != "best" and not re.fullmatch(r"video:[0-9]{1,5}", mode):
+        raise HTTPException(400, "Доступно только прямое скачивание MP4 со звуком.")
+    qualities = analyze_video(url)["qualities"]
+    selected = qualities[0] if mode == "best" else next(
+        (quality for quality in qualities if quality["mode"] == mode), None
+    )
+    if selected is None:
+        raise HTTPException(422, "Для этого разрешения нет прямого MP4 со звуком.")
+    return RedirectResponse(selected["url"], status_code=302, headers=NO_STORE)
 
 sync_youtube_cookies(force=True)
 sync_twitter_cookies(force=True)

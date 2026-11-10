@@ -1,6 +1,8 @@
-FROM python:3.12-slim
+FROM node:22-bookworm-slim AS node
+FROM python:3.12-slim-bookworm
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 ARG XRAY_VERSION=25.9.11
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" \
     && unzip /tmp/xray.zip xray -d /usr/local/bin \
     && chmod +x /usr/local/bin/xray \

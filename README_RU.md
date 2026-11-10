@@ -1,38 +1,9 @@
-# Video Downloader v5.1 Web — Render Secret File
+# Video Downloader v5.1 для Render
 
-Эта версия рассчитана на Secret File Render:
+Сайт принимает ссылку на ролик YouTube или запись X. `POST /api/analyze` возвращает доступные прямые URL MP4 со звуком. Браузер открывает URL на CDN источника. `GET /api/download` возвращает HTTP 302 на CDN для старых ссылок. Видеофайлы через Render не передаются.
 
-- Filename: `youtube.txt`
-- Runtime path: `/etc/secrets/youtube.txt`
+Прямые ссылки действуют ограниченное время. Если ссылка устарела, найдите ролик ещё раз. Некоторые CDN-ссылки привязаны к IP, региону или сессии. Если CDN отклоняет запрос, либо источник раздаёт видео и звук раздельно, используйте Windows-приложение.
 
-Содержимое `youtube.txt` НЕ нужно добавлять в GitHub.
+Образ включает Node.js и ту же версию yt-dlp, что и Windows-сборка. Если анализу нужен доступ YouTube или X, сервис поддерживает Render Secret Files `youtube.txt`, `twitter.txt` и `vless.txt`, а также переменную `YOUTUBE_PROXY` для запросов метаданных.
 
-## Что исправлено относительно v5
-
-Функция `opts(url="")` сохранена в нужном виде, но теперь URL действительно
-передаётся в неё в ОБОИХ местах:
-
-- анализ: `yt_dlp.YoutubeDL(opts(u) | {"skip_download": True})`
-- скачивание: `o = opts(u) | {...}`
-
-Поэтому YouTube получает `cookiefile=/etc/secrets/youtube.txt`, если Secret File существует.
-
-## Проверка после Deploy
-
-Открой:
-
-`https://ВАШ-СЕРВИС.onrender.com/api/health`
-
-Должно быть примерно:
-
-`{"ok":true,"youtube_cookies":true,"youtube_cookies_size":12345}`
-
-Если `youtube_cookies` = false, Render не видит Secret File.
-Если true, приложение нашло файл. Само содержимое cookies API никогда не показывает.
-
-После изменения Secret File или кода сделай новый Deploy/Restart сервиса.
-
-## Безопасность
-
-Не коммить `youtube.txt` в GitHub.
-Secret File содержит данные сессии аккаунта; не публикуй его содержимое.
+Для проверки деплоя откройте `/api/health`. Текущая версия возвращает `{"ok":true,"delivery":"direct"}`.
